@@ -1,87 +1,239 @@
 {
-    "type": "Settings",
-    "audio": {
-        "input": {
-            "encoding": "mulaw",
-            "sample_rate": 8000
-        },
-        "output": {
-            "encoding": "mulaw",
-            "sample_rate": 8000,
-            "container": "none"
-        }
+  "type": "Settings",
+  "audio": {
+    "input": { "encoding": "mulaw", "sample_rate": 8000 },
+    "output": { "encoding": "mulaw", "sample_rate": 8000, "container": "none" }
+  },
+  "agent": {
+    "language": "en",
+    "listen": {
+      "provider": { "type": "deepgram", "model": "nova-3" }
     },
-    "agent": {
-        "language": "en",
-        "listen": {
-            "provider": {
-                "type": "deepgram",
-                "model": "nova-3",
-                "keyterms": ["hello", "goodbye"]
-            }
-        },
-        "think": {
-            "provider": {
-                "type": "open_ai",
-                "model": "gpt-4o-mini",
-                "temperature": 0.7
+    "think": {
+      "provider": {
+        "type": "open_ai",
+        "model": "gpt-4o-mini",
+        "temperature": 0.3
+      },
+      "prompt": "ROLE & NAME: You are Benjamin, Oakwood Law Firm's voice intake specialist.\n\nSCOPE: Intake only. No legal advice and no fee quotes. Keep empathy, clarity, and urgency. Follow the SOP strictly and proceed one field at a time.\n\nBUSINESS DETAILS: Oakwood Law Firm, 456 Justice Avenue, Anaheim, California. Working hours for consultation booking are Monday–Friday 9 AM–5 PM; no weekend bookings. Main phone: 930-555-1234. Practice areas: Personal Injury Law; Family Law; Lemon Law. Attorneys: John Doe (Personal Injury); Jane Roe (Lemon Law); Rhonda Fernandez (Family Law); Christopher Teal (Family Law). No other attorneys. \n\nCARDINAL RULES: (1) Stay on sequence for every step. (2) Collect caller info one field at a time. (3) Use empathy and acknowledge feelings. (4) Explain processes clearly. (5) Booking: collect preferred date (month/day) and 12-hour time; book only Mon–Fri 9 AM–5 PM; never on weekends/holidays; book with a specialist attorney only; do not book multiple appointments for the same caller; ensure the prior steps (contact info → practice area) are complete before scheduling. (6) Professionalism and compliance: no legal advice, no fees; handle data privately; never ask for sensitive numbers; be courteous. (7) If a request is outside parameters (e.g., weekend booking), offer compliant alternatives (next business hours). \n\nCHANNELS: Handle voice calls as primary; treat DMs/forms similarly if surfaced. Always capture contact intent and details before concluding.\n\nSPEAKING STYLE: Concise, professional, empathetic. Avoid multi-question prompts; ask one, wait, confirm. Read times as words (e.g., 'One Thirty Pee Em'). Read phone numbers like 'four one five – eight nine two – three two four five'. Refer to dates colloquially (e.g., 'Friday, Jan 12th at 8 am'). Add natural fillers sparingly (e.g., 'I understand', 'Absolutely').\n\nPROCESS (13 STEPS):\n1) Greeting & caller status (new vs returning). If unsure, explain the difference and ask about their matter.\n2) Identify practice area (Personal Injury, Family Law, or Lemon Law). If unclear, ask a clarifying single question. If multiple, prioritize the most urgent.\n3) Capture contact info: first name (spell), last name (spell), email (spell), cell number (7 or 10 digits). If any field seems incorrect, re-verify only that field. \n4) Ask permission for intake; if yes, proceed; if no, offer Terms of Engagement link via SMS/email and continue the standardized flow.\n5) Intake – Personal Injury (16 questions in order: accident description; date; police report; witnesses; passengers; damage extent; injury types; received treatment; still in treatment; missed work; other party injuries; citations (who); contacted insurance; coverage type; repair estimate; settlement offer). Only after all 16, proceed to booking.\n6) Intake – Family Law (8 questions in order: issue type; duration; existing court orders; children; children concern; prior attorney; mediation; desired outcome). After all 8, proceed to booking.\n7) Intake – Lemon Law: start by vehicle year. If before 2019 → politely state firm handles 2019+ and offer other help; else gather structured details across vehicle info, purchase/warranty, defect description, repair history, dealer/manufacturer interactions, impact on use/value/safety, legal/warranty compliance, desired outcome, documentation. If qualifying → send Terms of Engagement link and proceed to the engagement nurturing page; if not → explain and wrap.\n8) Booking (Personal Injury/Family): propose earliest two slots within Mon–Fri 9–5 for the correct specialist attorney; if unavailable, propose two alternatives; on confirmation, finalize; if systems fail, record details manually and advise staff callback. Do not allow a second booking while one is active.\n9) Confirm & send: immediately send confirmation via email and SMS; update CRM if available.\n10) Confirm next steps: restate date/time/attorney; ask if anything might prevent attendance; invite to firm community links.\n11) Reminders: send one day before, 8 working hours before, and 1 hour before via preferred channel; if no-shows or conflicts, offer reschedule.\n12) Follow-ups & CRM updates: maintain status, notes, and tags; never end without clear next step or captured contact data.\n13) Wrap-up: summarize, provide reschedule link, and close politely.\n\nRESPONSES: Use short, single questions. Guide gently back to process if diverted. When unsure on qualification, lean toward qualified and continue intake/booking. If CRM/tools unavailable, keep taking info in transcript and continue.\n\nBOOKING LIMITS & HOURS ENFORCEMENT: Never book weekends. Enforce 9 AM–5 PM local working hours. Book only with relevant specialist attorney.\n\nATTORNEY NAME DISCLOSURE: You may confirm attorney names only when a booking is being set for that practice area. \n\nTERMS OF ENGAGEMENT (Lemon Law): Before any Lemon Law booking, send and confirm receipt of the Terms of Engagement link by SMS and email; handle 'yes', 'not sure', 'no' per procedure; if the caller persists for direct booking, restate policy and route appropriately.",
+      "functions": [
+        {
+          "name": "inbound_call",
+          "description": "Attend and handle an incoming voice call.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "caller_id": { "type": "string" },
+              "timestamp_iso": { "type": "string" }
             },
-            "prompt": "You are a professional pharmacy assistant. You can: 1) Get drug info with get_drug_info, 2) Place orders with place_order, 3) Look up orders with lookup_order. IMPORTANT: Always ask users to spell out their full name clearly when placing orders. Confirm all order details before processing - including customer name, drug name, and quantity. Be thorough and professional in collecting information. If a user provides a name that's unclear, ask them to spell it out letter by letter. Always confirm the complete order details before finalizing any transaction.",
-            "functions": [
-              {
-                "name": "get_drug_info",
-                "description": "Get detailed information about a specific drug. Use this function when: A customer asks about drug information, side effects, or pricing. A customer wants to know what a medication does. A customer asks questions like 'What is aspirin?' or 'Tell me about ibuprofen'. A customer wants to know drug prices or descriptions. Always provide helpful information about the drug's purpose, price, and any relevant details.",
-                "parameters": {
-                  "type": "object",
-                  "properties": {
-                    "drug_name": {
-                      "type": "string",
-                      "description": "Name of the drug to look up. Convert to lowercase for matching. Examples: 'aspirin', 'ibuprofen', 'acetaminophen'"
-                    }
-                  },
-                  "required": ["drug_name"]
-                }
-              },
-              {
-                "name": "place_order",
-                "description": "Place a new prescription order for a customer. Use this function when: A customer wants to order medication. A customer asks to refill a prescription. A customer says 'I need to order' or 'Can I get some'. Each drug has a predefined quantity that will be ordered automatically. Before placing an order: Verify the drug exists using get_drug_info. Get the customer's name for the order. Always confirm the order details before processing.",
-                "parameters": {
-                  "type": "object",
-                  "properties": {
-                    "customer_name": {
-                      "type": "string",
-                      "description": "Customer's full name for the order. Use as provided by the customer."
-                    },
-                    "drug_name": {
-                      "type": "string",
-                      "description": "Name of the drug to order. Convert to lowercase for matching. Must be a valid drug in our system. Examples: 'aspirin', 'metformin', 'lisinopril', 'atorvastatin', 'omeprazole'"
-                    }
-                  },
-                  "required": ["customer_name", "drug_name"]
-                }
-              },
-              {
-                "name": "lookup_order",
-                "description": "Look up an existing order by its ID. Use this function when: A customer asks about a specific order. A customer wants to check order status. A customer says 'Where is my order' or 'Check order number'. A customer provides an order ID number. Always verify the order exists and provide clear information about the order details.",
-                "parameters": {
-                  "type": "object",
-                  "properties": {
-                    "order_id": {
-                      "type": "integer",
-                      "description": "The order ID number to look up. Must be a valid order number in our system."
-                    }
-                  },
-                  "required": ["order_id"]
-                }
+            "required": ["timestamp_iso"]
+          }
+        },
+        {
+          "name": "inbound_message",
+          "description": "Receive and manage an incoming direct message or form submission.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "channel": { "type": "string" },
+              "message_id": { "type": "string" },
+              "text": { "type": "string" }
+            },
+            "required": ["channel", "text"]
+          }
+        },
+        {
+          "name": "outbound_call",
+          "description": "Place an outbound call to a lead.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "to_e164": { "type": "string" },
+              "reason": { "type": "string" }
+            },
+            "required": ["to_e164"]
+          }
+        },
+        {
+          "name": "practice_area",
+          "description": "Set or update the caller's practice area (Personal Injury, Family Law, Lemon Law).",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "practice_area": {
+                "type": "string",
+                "enum": ["personal_injury", "family_law", "lemon_law"]
               }
+            },
+            "required": ["practice_area"]
+          }
+        },
+        {
+          "name": "contact_information",
+          "description": "Capture contact details.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "first_name": { "type": "string" },
+              "last_name": { "type": "string" },
+              "email": { "type": "string" },
+              "cell_phone": {
+                "type": "string",
+                "description": "7 or 10 digits"
+              }
+            },
+            "required": ["first_name", "last_name", "email", "cell_phone"]
+          }
+        },
+        {
+          "name": "intake_answers_qualification",
+          "description": "Store structured intake answers and current qualification status.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "practice_area": {
+                "type": "string",
+                "enum": ["personal_injury", "family_law", "lemon_law"]
+              },
+              "answers": { "type": "object" },
+              "qualified": { "type": "boolean" }
+            },
+            "required": ["practice_area", "answers"]
+          }
+        },
+        {
+          "name": "practice_area_attorney_name",
+          "description": "Return the designated attorney name for a practice area.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "practice_area": {
+                "type": "string",
+                "enum": ["personal_injury", "family_law", "lemon_law"]
+              }
+            },
+            "required": ["practice_area"]
+          }
+        },
+        {
+          "name": "calendar_booking",
+          "description": "Create a consultation booking.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "attorney_name": { "type": "string" },
+              "start_iso": { "type": "string" },
+              "duration_min": { "type": "integer" },
+              "location": {
+                "type": "string",
+                "description": "in-person or video"
+              },
+              "caller_first_name": { "type": "string" },
+              "caller_last_name": { "type": "string" },
+              "email": { "type": "string" },
+              "cell_phone": { "type": "string" }
+            },
+            "required": [
+              "attorney_name",
+              "start_iso",
+              "duration_min",
+              "caller_first_name",
+              "caller_last_name"
             ]
+          }
         },
-        "speak": {
-            "provider": {
-                "type": "deepgram",
-                "model": "aura-2-thalia-en"
+        {
+          "name": "reschedule_calendar_booking",
+          "description": "Reschedule an existing consultation booking.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "booking_id": { "type": "string" },
+              "new_start_iso": { "type": "string" }
+            },
+            "required": ["booking_id", "new_start_iso"]
+          }
+        },
+        {
+          "name": "terms_of_engagement_letter",
+          "description": "Send Terms of Engagement link by email and SMS; confirm receipt.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "email": { "type": "string" },
+              "cell_phone": { "type": "string" }
             }
+          }
         },
-        "greeting": "Hello! I'm your pharmacy assistant. I can help you with drug information, placing orders, and checking order status. When placing orders, I'll need your full name spelled out clearly and will confirm all details with you. How can I assist you today?"
-    }
+        {
+          "name": "send_email",
+          "description": "Send an email message.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "to": { "type": "string" },
+              "subject": { "type": "string" },
+              "html": { "type": "string" }
+            },
+            "required": ["to", "subject", "html"]
+          }
+        },
+        {
+          "name": "send_sms",
+          "description": "Send an SMS message.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "to_e164": { "type": "string" },
+              "message": { "type": "string" }
+            },
+            "required": ["to_e164", "message"]
+          }
+        },
+        {
+          "name": "send_whatsapp",
+          "description": "Send a WhatsApp message.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "to_e164": { "type": "string" },
+              "message": { "type": "string" }
+            },
+            "required": ["to_e164", "message"]
+          }
+        },
+        {
+          "name": "send_linkedin_invite",
+          "description": "Send a LinkedIn invite.",
+          "parameters": {
+            "type": "object",
+            "properties": { "profile_url": { "type": "string" } },
+            "required": ["profile_url"]
+          }
+        },
+        {
+          "name": "send_facebook_invite",
+          "description": "Send a Facebook invite.",
+          "parameters": {
+            "type": "object",
+            "properties": { "profile_url": { "type": "string" } },
+            "required": ["profile_url"]
+          }
+        },
+        {
+          "name": "update_crm",
+          "description": "Update CRM with the latest intake, booking, and status.",
+          "parameters": {
+            "type": "object",
+            "properties": { "fields": { "type": "object" } },
+            "required": ["fields"]
+          }
+        }
+      ]
+    },
+    "speak": {
+      "provider": { "type": "deepgram", "model": "aura-2-thalia-en" }
+    },
+    "greeting": "Thank you for contacting Oakwood Law Firm. I’m Benjamin. To begin, is this your first time reaching us or are you a returning client?"
+  }
 }
