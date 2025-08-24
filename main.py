@@ -31,67 +31,8 @@ def sts_connect():
     )
 
 def load_config():
-    # Create a basic config for Deepgram
-    config = {
-        "model": "nova-2",
-        "language": "en-US",
-        "encoding": "mulaw",
-        "sample_rate": 8000,
-        "functions": [
-            {
-                "name": "save_lead",
-                "description": "Save lead contact information to the database",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "first_name": {"type": "string"},
-                        "last_name": {"type": "string"},
-                        "email": {"type": "string"},
-                        "phone": {"type": "string"}
-                    },
-                    "required": ["first_name", "last_name", "email", "phone"]
-                }
-            },
-            {
-                "name": "update_lead_practice_area",
-                "description": "Update the practice area for a lead",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "lead_id": {"type": "integer"},
-                        "practice_area_name": {"type": "string"}
-                    },
-                    "required": ["lead_id", "practice_area_name"]
-                }
-            },
-            {
-                "name": "save_appointment",
-                "description": "Save an appointment for a lead",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "lead_id": {"type": "integer"},
-                        "attorney_name": {"type": "string"},
-                        "date_time": {"type": "string", "format": "date-time"}
-                    },
-                    "required": ["lead_id", "attorney_name", "date_time"]
-                }
-            },
-            {
-                "name": "send_confirmation_email",
-                "description": "Send a confirmation email for an appointment",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "lead_id": {"type": "integer"},
-                        "appointment_id": {"type": "integer"}
-                    },
-                    "required": ["lead_id", "appointment_id"]
-                }
-            }
-        ]
-    }
-    return config
+    with open("config.json", "r", encoding="utf-8") as f:
+        return json.load(f)
 
 async def handle_barge_in(decoded, twilio_ws, streamsid):
     if decoded.get("type") == "UserStartedSpeaking":
