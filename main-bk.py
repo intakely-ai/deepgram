@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 import websockets
 from websockets.asyncio.server import serve  # explicit for >=13
-from pharmacy_functions import FUNCTION_MAP
+from lawfirm_functions import FUNCTION_MAP
 
 load_dotenv()
 
