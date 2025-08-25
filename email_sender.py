@@ -1,23 +1,24 @@
 # email_sender.py
-import os
-import ssl
-import smtplib
+import os, ssl, smtplib
 from email.message import EmailMessage
 from typing import List, Optional, Union
+from dotenv import load_dotenv
+
+# Load .env so this module works in tests and scripts
+load_dotenv()
 
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))  # STARTTLS
-SMTP_USER = os.getenv("SMTP_USER")              # e.g. youraddress@gmail.com
-SMTP_PASS = os.getenv("SMTP_PASS")              # App Password (16 chars)
-SENDER_NAME = os.getenv("SENDER_NAME", "")      # e.g. "Oakwood Law Firm"
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))      # 587=STARTTLS, 465=SSL
+SMTP_USER = os.getenv("SMTP_USER")                  # e.g. youraddress@gmail.com OR "apikey" (SendGrid)
+SMTP_PASS = os.getenv("SMTP_PASS")                  # Gmail App Password OR SendGrid API key
+SENDER_NAME = os.getenv("SENDER_NAME", "")          # e.g. "Oakwood Law Firm"
+FROM_EMAIL  = os.getenv("SMTP_FROM_EMAIL") or SMTP_USER
 
 def _normalize_recipients(value: Union[str, List[str], None]) -> List[str]:
     if not value:
         return []
     if isinstance(value, str):
-        # split by comma if a single string with multiple addresses
-        parts = [p.strip() for p in value.split(",") if p.strip()]
-        return parts
+        return [p.strip() for p in value.split(",") if p.strip()]
     return [v.strip() for v in value if v and v.strip()]
 
 def send_email_smtp(
@@ -29,22 +30,17 @@ def send_email_smtp(
     bcc: Optional[Union[str, List[str]]] = None,
     reply_to: Optional[str] = None,
 ) -> dict:
-    """
-    Sends an email via SMTP (Gmail-ready). Returns dict with ok, message_id, error.
-    """
     if not SMTP_USER or not SMTP_PASS:
         return {"ok": False, "error": "SMTP_USER/SMTP_PASS not set in environment"}
 
-    to_list = _normalize_recipients(to)
-    cc_list = _normalize_recipients(cc)
+    to_list  = _normalize_recipients(to)
+    cc_list  = _normalize_recipients(cc)
     bcc_list = _normalize_recipients(bcc)
-
     if not to_list:
         return {"ok": False, "error": "No 'to' recipients provided"}
 
     msg = EmailMessage()
-    from_header = f"{SENDER_NAME} <{SMTP_USER}>" if SENDER_NAME else SMTP_USER
-    msg["From"] = from_header
+    msg["From"] = f"{SENDER_NAME} <{FROM_EMAIL}>" if SENDER_NAME else FROM_EMAIL
     msg["To"] = ", ".join(to_list)
     if cc_list:
         msg["Cc"] = ", ".join(cc_list)
@@ -52,32 +48,33 @@ def send_email_smtp(
         msg["Reply-To"] = reply_to
     msg["Subject"] = subject
 
-    # Set body (both text/plain and text/html). Fallback text if not given.
+    # plain text fallback if none provided (very light)
     if not text:
-        # very light fallback text from html (strip tags naïvely)
-        stripped = html.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
-        for tag in ["<p>", "</p>", "<strong>", "</strong>", "<em>", "</em>"]:
-            stripped = stripped.replace(tag, "")
+        stripped = (
+            html.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+                .replace("</p>", "\n").replace("<p>", "").replace("<strong>", "")
+                .replace("</strong>", "").replace("<em>", "").replace("</em>", "")
+        )
         text = stripped
     msg.set_content(text)
     msg.add_alternative(html, subtype="html")
 
-    # All recipients for SMTP (To + Cc + Bcc)
     all_rcpts = list(dict.fromkeys(to_list + cc_list + bcc_list))
-
-    context = ssl.create_default_context()
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.ehlo()
-            server.starttls(context=context)
-            server.ehlo()
-            server.login(SMTP_USER, SMTP_PASS)
-            resp = server.send_message(msg, from_addr=SMTP_USER, to_addrs=all_rcpts)
-            # smtplib returns a dict of refused recipients; {} means success.
-            if resp:
-                return {"ok": False, "error": f"Some recipients refused: {resp}"}
+        if SMTP_PORT == 465:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ssl.create_default_context()) as server:
+                server.login(SMTP_USER, SMTP_PASS)
+                refused = server.send_message(msg, from_addr=FROM_EMAIL, to_addrs=all_rcpts)
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+                server.ehlo()
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
+                server.login(SMTP_USER, SMTP_PASS)
+                refused = server.send_message(msg, from_addr=FROM_EMAIL, to_addrs=all_rcpts)
+
+        if refused:  # dict of recipients that were refused
+            return {"ok": False, "error": f"Some recipients refused: {refused}"}
+        return {"ok": True, "to": to_list, "cc": cc_list, "bcc": bcc_list, "message_id": msg.get("Message-ID")}
     except Exception as e:
         return {"ok": False, "error": str(e)}
-
-    # EmailMessage generates a Message-ID automatically when sending
-    return {"ok": True, "message_id": msg.get("Message-ID")}
