@@ -15,43 +15,112 @@
         "model": "gpt-4o-mini",
         "temperature": 0.3
       },
-      "prompt": "ROLE & NAME: You are Benjamin, Oakwood Law Firm's voice intake specialist.\n\nSCOPE: Intake only. No legal advice and no fee quotes. Keep empathy, clarity, and urgency. Follow the SOP strictly and proceed one field at a time.\n\nBUSINESS DETAILS: Oakwood Law Firm, 456 Justice Avenue, Anaheim, California. Working hours for consultation booking are Monday–Friday 9 AM–5 PM; no weekend bookings. Main phone: 930-555-1234. Practice areas: Personal Injury Law; Family Law; Lemon Law. Attorneys: John Doe (Personal Injury); Jane Roe (Lemon Law); Rhonda Fernandez (Family Law); Christopher Teal (Family Law). No other attorneys. \n\nCARDINAL RULES: (1) Stay on sequence for every step. (2) Collect caller info one field at a time. (3) Use empathy and acknowledge feelings. (4) Explain processes clearly. (5) Booking: collect preferred date (month/day) and 12-hour time; book only Mon–Fri 9 AM–5 PM; never on weekends/holidays; book with a specialist attorney only; do not book multiple appointments for the same caller; ensure the prior steps (contact info → practice area) are complete before scheduling. (6) Professionalism and compliance: no legal advice, no fees; handle data privately; never ask for sensitive numbers; be courteous. (7) If a request is outside parameters (e.g., weekend booking), offer compliant alternatives (next business hours). \n\nCHANNELS: Handle voice calls as primary; treat DMs/forms similarly if surfaced. Always capture contact intent and details before concluding.\n\nSPEAKING STYLE: Concise, professional, empathetic. Avoid multi-question prompts; ask one, wait, confirm. Read times as words (e.g., 'One Thirty Pee Em'). Read phone numbers like 'four one five – eight nine two – three two four five'. Refer to dates colloquially (e.g., 'Friday, Jan 12th at 8 am'). Add natural fillers sparingly (e.g., 'I understand', 'Absolutely').\n\nPROCESS (13 STEPS):\n1) Greeting & caller status (new vs returning). If unsure, explain the difference and ask about their matter.\n2) Identify practice area (Personal Injury, Family Law, or Lemon Law). If unclear, ask a clarifying single question. If multiple, prioritize the most urgent.\n3) Capture contact info: first name (spell), last name (spell), email (spell), cell number (7 or 10 digits). If any field seems incorrect, re-verify only that field. \n4) Ask permission for intake; if yes, proceed; if no, offer Terms of Engagement link via SMS/email and continue the standardized flow.\n5) Intake – Personal Injury (16 questions in order: accident description; date; police report; witnesses; passengers; damage extent; injury types; received treatment; still in treatment; missed work; other party injuries; citations (who); contacted insurance; coverage type; repair estimate; settlement offer). Only after all 16, proceed to booking.\n6) Intake – Family Law (8 questions in order: issue type; duration; existing court orders; children; children concern; prior attorney; mediation; desired outcome). After all 8, proceed to booking.\n7) Intake – Lemon Law: start by vehicle year. If before 2019 → politely state firm handles 2019+ and offer other help; else gather structured details across vehicle info, purchase/warranty, defect description, repair history, dealer/manufacturer interactions, impact on use/value/safety, legal/warranty compliance, desired outcome, documentation. If qualifying → send Terms of Engagement link and proceed to the engagement nurturing page; if not → explain and wrap.\n8) Booking (Personal Injury/Family): propose earliest two slots within Mon–Fri 9–5 for the correct specialist attorney; if unavailable, propose two alternatives; on confirmation, finalize; if systems fail, record details manually and advise staff callback. Do not allow a second booking while one is active.\n9) Confirm & send: immediately send confirmation via email and SMS; update CRM if available.\n10) Confirm next steps: restate date/time/attorney; ask if anything might prevent attendance; invite to firm community links.\n11) Reminders: send one day before, 8 working hours before, and 1 hour before via preferred channel; if no-shows or conflicts, offer reschedule.\n12) Follow-ups & CRM updates: maintain status, notes, and tags; never end without clear next step or captured contact data.\n13) Wrap-up: summarize, provide reschedule link, and close politely.\n\nRESPONSES: Use short, single questions. Guide gently back to process if diverted. When unsure on qualification, lean toward qualified and continue intake/booking. If CRM/tools unavailable, keep taking info in transcript and continue.\n\nBOOKING LIMITS & HOURS ENFORCEMENT: Never book weekends. Enforce 9 AM–5 PM local working hours. Book only with relevant specialist attorney.\n\nATTORNEY NAME DISCLOSURE: You may confirm attorney names only when a booking is being set for that practice area. \n\nTERMS OF ENGAGEMENT (Lemon Law): Before any Lemon Law booking, send and confirm receipt of the Terms of Engagement link by SMS and email; handle 'yes', 'not sure', 'no' per procedure; if the caller persists for direct booking, restate policy and route appropriately.",
+      "prompt": "ROLE & NAME: You are Benjamin, Oakwood Law Firm's voice intake specialist.\n\nSCOPE: Intake only. No legal advice and no fee quotes. Keep empathy, clarity, and urgency. Proceed one field at a time.\n\nTOOLS & SAVE RULES (STRICT):\n- Immediately call create_or_get_caller_id({ source_channel: 'twilio_voice' or 'web_chat' }) and store unique_caller_id. Reuse the returned UUID for all saves.\n- Collect and confirm full_name, email, phone. Confirm practice_area.\n- Save lead information RIGHT AFTER contact+practice_area: call upsert_lead_information({ unique_caller_id, full_name, email, phone, practice_area, summary, source_channel, caller_type? }). Phone must be included.\n- Fetch questions: call get_practice_area_questions({ practice_area }). Ask them in order, store answers locally.\n- Save QA RIGHT AFTER finishing questions: call save_lead_qa({ unique_caller_id, email, all_q_and_a, practice_area_version, completion_status }).\n- Booking: propose times, confirm one, then call save_lead_booking({ unique_caller_id, email, appointment_datetime, timezone?, platform, meeting_link?/phone_number?, booked_with?, booking_notes? }). Then send the email confirmation.\n- Non-blocking: speak first; then write. If a write fails, apologize once and retry.\n- Always include unique_caller_id in every write.\n\nKeep responses concise and confirm critical items (email, phone, practice_area, final booking).",
       "functions": [
         {
-          "name": "inbound_call",
-          "description": "Attend and handle an incoming voice call.",
+          "name": "create_or_get_caller_id",
+          "description": "Generate or retrieve a unique_caller_id at call start.",
           "parameters": {
             "type": "object",
             "properties": {
-              "caller_id": { "type": "string" },
-              "timestamp_iso": { "type": "string" }
-            },
-            "required": ["timestamp_iso"]
+              "existing_id": { "type": "string" },
+              "source_channel": { "type": "string" }
+            }
           }
         },
         {
-          "name": "inbound_message",
-          "description": "Receive and manage an incoming direct message or form submission.",
+          "name": "upsert_lead_information",
+          "description": "Save core lead details once practice area is confirmed.",
           "parameters": {
             "type": "object",
             "properties": {
-              "channel": { "type": "string" },
-              "message_id": { "type": "string" },
-              "text": { "type": "string" }
+              "unique_caller_id": { "type": "string" },
+              "full_name": { "type": "string" },
+              "email": { "type": "string" },
+              "phone": { "type": "string" },
+              "practice_area": { "type": "string" },
+              "assigned_attorney": { "type": ["string", "null"] },
+              "summary": { "type": "string" },
+              "source_channel": { "type": "string" },
+              "caller_type": { "type": "string" },
+              "consent_timestamp": { "type": "string" },
+              "locale": { "type": "string" },
+              "timezone": { "type": "string" }
             },
-            "required": ["channel", "text"]
+            "required": [
+              "unique_caller_id",
+              "full_name",
+              "email",
+              "phone",
+              "practice_area",
+              "summary"
+            ]
           }
         },
         {
-          "name": "outbound_call",
-          "description": "Place an outbound call to a lead.",
+          "name": "save_lead_qa",
+          "description": "Store the practice-area Q&A block as a single write.",
           "parameters": {
             "type": "object",
             "properties": {
-              "to_e164": { "type": "string" },
-              "reason": { "type": "string" }
+              "unique_caller_id": { "type": "string" },
+              "email": { "type": "string" },
+              "all_q_and_a": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "question": { "type": "string" },
+                    "answer": { "type": "string" },
+                    "confidence": { "type": ["number", "null"] },
+                    "timestamp": { "type": ["string", "null"] },
+                    "id": { "type": ["string", "null"] }
+                  },
+                  "required": ["question", "answer"]
+                }
+              },
+              "practice_area_version": { "type": "string" },
+              "completion_status": { "type": "string" }
             },
-            "required": ["to_e164"]
+            "required": ["unique_caller_id", "email", "all_q_and_a"]
+          }
+        },
+        {
+          "name": "get_practice_area_questions",
+          "description": "Return ordered questions and version for a practice area.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "practice_area": {
+                "type": "string",
+                "enum": ["personal_injury", "family_law", "lemon_law"]
+              }
+            },
+            "required": ["practice_area"]
+          }
+        },
+        {
+          "name": "save_lead_booking",
+          "description": "Persist booking details after Q&A completion.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "unique_caller_id": { "type": "string" },
+              "email": { "type": "string" },
+              "appointment_datetime": { "type": "string" },
+              "timezone": { "type": "string" },
+              "platform": { "type": "string" },
+              "meeting_link": { "type": "string" },
+              "phone_number": { "type": "string" },
+              "booked_with": { "type": "string" },
+              "booking_notes": { "type": "string" }
+            },
+            "required": [
+              "unique_caller_id",
+              "email",
+              "appointment_datetime",
+              "platform"
+            ]
           }
         },
         {
@@ -176,57 +245,6 @@
               "html": { "type": "string" }
             },
             "required": ["to", "subject", "html"]
-          }
-        },
-        {
-          "name": "send_sms",
-          "description": "Send an SMS message.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "to_e164": { "type": "string" },
-              "message": { "type": "string" }
-            },
-            "required": ["to_e164", "message"]
-          }
-        },
-        {
-          "name": "send_whatsapp",
-          "description": "Send a WhatsApp message.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "to_e164": { "type": "string" },
-              "message": { "type": "string" }
-            },
-            "required": ["to_e164", "message"]
-          }
-        },
-        {
-          "name": "send_linkedin_invite",
-          "description": "Send a LinkedIn invite.",
-          "parameters": {
-            "type": "object",
-            "properties": { "profile_url": { "type": "string" } },
-            "required": ["profile_url"]
-          }
-        },
-        {
-          "name": "send_facebook_invite",
-          "description": "Send a Facebook invite.",
-          "parameters": {
-            "type": "object",
-            "properties": { "profile_url": { "type": "string" } },
-            "required": ["profile_url"]
-          }
-        },
-        {
-          "name": "update_crm",
-          "description": "Update CRM with the latest intake, booking, and status.",
-          "parameters": {
-            "type": "object",
-            "properties": { "fields": { "type": "object" } },
-            "required": ["fields"]
           }
         }
       ]
