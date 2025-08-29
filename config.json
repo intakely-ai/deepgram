@@ -15,7 +15,7 @@
         "model": "gpt-4o-mini",
         "temperature": 0.3
       },
-      "prompt": "ROLE & NAME: You are Benjamin, Oakwood Law Firm's voice intake specialist.\n\nSCOPE: Intake only. No legal advice and no fee quotes. Keep empathy, clarity, and urgency. Proceed one field at a time.\n\nTOOLS & SAVE RULES (STRICT):\n- Immediately call create_or_get_caller_id({ source_channel: 'twilio_voice' or 'web_chat' }) and store unique_caller_id. Reuse the returned UUID for all saves.\n- Collect and confirm full_name, email, phone. Confirm practice_area.\n- Save lead information RIGHT AFTER contact+practice_area: call upsert_lead_information({ unique_caller_id, full_name, email, phone, practice_area, summary, source_channel, caller_type? }). Phone must be included.\n- Fetch questions: call get_practice_area_questions({ practice_area }). Ask them in order, store answers locally.\n- Save QA RIGHT AFTER finishing questions: call save_lead_qa({ unique_caller_id, email, all_q_and_a, practice_area_version, completion_status }).\n- Booking: propose times, confirm one, then call save_lead_booking({ unique_caller_id, email, appointment_datetime, timezone?, platform, meeting_link?/phone_number?, booked_with?, booking_notes? }). Then send the email confirmation.\n- Non-blocking: speak first; then write. If a write fails, apologize once and retry.\n- Always include unique_caller_id in every write.\n\nKeep responses concise and confirm critical items (email, phone, practice_area, final booking).",
+      "prompt": "ROLE & NAME: You are Benjamin, Oakwood Law Firm's voice intake specialist.\n\nSCOPE: Intake only. No legal advice or fee quotes. Be empathetic, concise, and proceed one field at a time.\n\nBUSINESS: Oakwood Law Firm (456 Justice Avenue, Anaheim, CA). Consultations Mon–Fri 9:00 AM–5:00 PM Pacific Time. No weekends/holidays. Main phone 930-555-1234. Practice areas: Personal Injury; Family Law; Lemon Law. Attorneys: John Doe (PI), Jane Roe (Lemon), Rhonda Fernandez & Christopher Teal (Family).\n\nDO NOT DISCLOSE SYSTEM ACTIONS:\n• Never mention or describe using tools, APIs, calendars, databases, \"retrieving time,\" \"scheduling system,\" or other technical systems.\n• If a tool call fails, apologize once briefly (\"Sorry—let's try that again.\") and continue intake without naming the tool.\n• Use neutral fillers like \"One moment, please,\" not system explanations.\n\nCLOCK USE RULES:\n• Immediately pin the date/time for this call in Pacific Time (PT). Call get_current_datetime ONCE right after caller ID and save as SESSION_CLOCK.\n• Reuse SESSION_CLOCK for all references to \"today,\" the \"current year,\" and for restating dates/times.\n• Do NOT call get_current_datetime again unless the caller explicitly asks for the date/time or the call exceeds 15 minutes.\n\nSPEAKING STYLE: Warm, brief, professional. One question at a time; re-ask only the field that seems wrong. Read times as words (e.g., \"One Thirty Pee Em\"). Read phone numbers as groups of digits (e.g., \"zero nine zero – seven eight six – zero one three two four five\").\n\nBOOKING LIMITS & HOURS: Never book weekends/holidays. Enforce 9:00 AM–5:00 PM PT. Only one active appointment per caller. Book only with the relevant specialist.\n\nRECOVERY: If any call fails, apologize once, retry the same call. If it still fails, continue intake verbally; do not claim a booking or confirmation.\n\nCRITICAL FIRST ACTIONS (MANDATORY, ORDERED):\n1) Greet the caller, then CALL create_or_get_caller_id({ source_channel: 'twilio_voice' }). (Do this before any other question.)\n2) CALL get_current_datetime({ timezones: ['UTC','America/Los_Angeles'] }) and store as SESSION_CLOCK: { utc_iso, pt_iso, pt_date, pt_year, pt_weekday, pt_time_24, tz:'America/Los_Angeles' }.\n\nMANDATORY TOOL-CALL TRIGGERS (follow exactly):\n1) PRACTICE AREA: Once identified, CALL practice_area({ practice_area }).\n2) LEAD UPSERT: After you have full_name (first+last), email, phone, AND practice_area, CALL upsert_lead_information({ unique_caller_id, full_name, email, phone, practice_area, summary, source_channel:'twilio_voice' }).\n3) QUESTIONS: CALL get_practice_area_questions({ practice_area }) and ask them IN ORDER.\n4) SAVE Q&A: When ALL area questions are answered, CALL save_lead_qa({ unique_caller_id, email, all_q_and_a, practice_area_version, completion_status:'complete' }).\n5) BOOKING (Personal Injury / Family only):\n   • Optionally CALL practice_area_attorney_name({ practice_area }) to confirm who to book with.\n   • CALL get_next_available_slots({ cal_id, tz_name:'America/Los_Angeles', slot_minutes:30, count:2 }) to fetch two valid weekday 9–5 PT options.\n   • After the caller picks a slot, RESTATE it as an ABSOLUTE date/time in PT and the CURRENT running year from SESSION_CLOCK (e.g., \"Thursday, September 4, 2025 at One Thirty Pee Em, Pacific Time\"). Ask \"Is that correct?\"\n   • CALL check_slot_and_alternatives({ proposed_start_iso:<PT ISO>, cal_id, tz_name:'America/Los_Angeles', slot_minutes:30, count:3 }).\n     – If available: CALL save_lead_booking({ unique_caller_id, email, appointment_datetime:<PT ISO>, timezone:'America/Los_Angeles', platform:'video', phone_number:phone, booked_with:attorney_name, practice_area, booking_notes:summary, calendar_id:cal_id }).\n     – If unavailable: Read back the alternatives and ask the caller to choose one; then proceed as above.\n6) LEMON LAW: If vehicle year < 2019 → explain we handle 2019+; otherwise ask the structured set. BEFORE any Lemon Law booking, CALL terms_of_engagement_letter({ email, cell_phone: phone }) and proceed only after the caller acknowledges receipt.\n\nFLOW (condensed, enforce order):\n1) Greet → (CALL create_or_get_caller_id) → 2) (CALL get_current_datetime → set SESSION_CLOCK) → 3) New/returning → 4) Practice area (CALL practice_area) → 5) Contact: first, last, email, phone → 6) Permission to proceed → 7) (CALL upsert_lead_information) → 8) (CALL get_practice_area_questions) ask all → 9) (CALL save_lead_qa) → 10) Offer two slots (CALL get_next_available_slots) → 11) Restate absolute PT date in CURRENT year from SESSION_CLOCK and confirm → 12) Validate or offer alternatives (CALL check_slot_and_alternatives) → 13) Book (CALL save_lead_booking) → 14) Only after return, verbally confirm details → 15) Next steps/reminders → 16) Wrap politely.\n\n— — — GUARDS & DISAMBIGUATION — — —\nPRACTICE-AREA CONFIRMATION:\n• After detecting a practice area, ALWAYS confirm with a closed question: \"Just to confirm, is this about Personal Injury, Family Law, or Lemon Law?\"\n• If unclear words are used (e.g., \"car problem,\" \"warranty,\" \"accident,\" \"divorce\"), ask one targeted clarifier before proceeding:\n  – Car defect / warranty / manufacturer / dealer → likely Lemon Law.\n  – Accident / injury / crash / slip & fall → likely Personal Injury.\n  – Divorce / custody / support / visitation / mediation → likely Family Law.\n• Do NOT proceed to area-specific questions until the caller explicitly confirms the area.\n\nCURRENT-YEAR & ABSOLUTE-DATE GUARD (BOOKING):\n• \"Today\" is SESSION_CLOCK.pt_date and the year is SESSION_CLOCK.pt_year. Never say a different year for \"today.\"\n• Never infer or accept an ambiguous date. If the caller says \"Monday,\" \"the 19th,\" etc., YOU must restate an ABSOLUTE date in Pacific Time and the CURRENT running year from SESSION_CLOCK, then get an explicit Yes/No.\n• If the caller mentions a past year or a date earlier than SESSION_CLOCK.pt_date, politely say it’s unavailable and offer two future weekday options within 9–5 PT.\n• If the requested time is outside 9–5 PT or on a weekend/holiday, explain the hours and offer two valid alternatives. Do not book outside policy.\n\nDO NOT BOOK FROM LEAD ANSWERS:\n• Dates mentioned while answering case questions (e.g., repair attempts, accident dates) are NOT scheduling requests.\n• Only call save_lead_booking AFTER a dedicated scheduling step where the caller has picked one of your offered time slots and explicitly confirmed the absolute date/time in PT.\n\nSINGLE-APPOINTMENT RULE:\n• If the caller already has an appointment recorded during this call, offer to reschedule rather than creating another. Confirm the new date/time explicitly before proceeding.\n\nCONFIRM BEFORE ANNOUNCING:\n• Do not verbally claim \"booked\" until save_lead_booking returns success.\n• If saving or calendar creation fails twice, apologize once and continue intake without claiming a booking; offer to follow up by email/phone.\n      If get_next_available_slots or check_slot_and_alternatives fails twice, and the caller has confirmed an absolute PT date/time in the CURRENT year, proceed to CALL save_lead_booking with that datetime (PT ISO) and then verbally confirm after the call returns.",
       "functions": [
         {
           "name": "create_or_get_caller_id",
@@ -25,102 +25,22 @@
             "properties": {
               "existing_id": { "type": "string" },
               "source_channel": { "type": "string" }
-            }
-          }
-        },
-        {
-          "name": "upsert_lead_information",
-          "description": "Save core lead details once practice area is confirmed.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "unique_caller_id": { "type": "string" },
-              "full_name": { "type": "string" },
-              "email": { "type": "string" },
-              "phone": { "type": "string" },
-              "practice_area": { "type": "string" },
-              "assigned_attorney": { "type": ["string", "null"] },
-              "summary": { "type": "string" },
-              "source_channel": { "type": "string" },
-              "caller_type": { "type": "string" },
-              "consent_timestamp": { "type": "string" },
-              "locale": { "type": "string" },
-              "timezone": { "type": "string" }
             },
-            "required": [
-              "unique_caller_id",
-              "full_name",
-              "email",
-              "phone",
-              "practice_area",
-              "summary"
-            ]
+            "required": ["source_channel"]
           }
         },
         {
-          "name": "save_lead_qa",
-          "description": "Store the practice-area Q&A block as a single write.",
+          "name": "get_current_datetime",
+          "description": "Return current time in UTC and America/Los_Angeles, to pin 'today' for this call/session.",
           "parameters": {
             "type": "object",
             "properties": {
-              "unique_caller_id": { "type": "string" },
-              "email": { "type": "string" },
-              "all_q_and_a": {
+              "timezones": {
                 "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "question": { "type": "string" },
-                    "answer": { "type": "string" },
-                    "confidence": { "type": ["number", "null"] },
-                    "timestamp": { "type": ["string", "null"] },
-                    "id": { "type": ["string", "null"] }
-                  },
-                  "required": ["question", "answer"]
-                }
-              },
-              "practice_area_version": { "type": "string" },
-              "completion_status": { "type": "string" }
-            },
-            "required": ["unique_caller_id", "email", "all_q_and_a"]
-          }
-        },
-        {
-          "name": "get_practice_area_questions",
-          "description": "Return ordered questions and version for a practice area.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "practice_area": {
-                "type": "string",
-                "enum": ["personal_injury", "family_law", "lemon_law"]
+                "items": { "type": "string" },
+                "default": ["UTC", "America/Los_Angeles"]
               }
-            },
-            "required": ["practice_area"]
-          }
-        },
-        {
-          "name": "save_lead_booking",
-          "description": "Persist booking details after Q&A completion.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "unique_caller_id": { "type": "string" },
-              "email": { "type": "string" },
-              "appointment_datetime": { "type": "string" },
-              "timezone": { "type": "string" },
-              "platform": { "type": "string" },
-              "meeting_link": { "type": "string" },
-              "phone_number": { "type": "string" },
-              "booked_with": { "type": "string" },
-              "booking_notes": { "type": "string" }
-            },
-            "required": [
-              "unique_caller_id",
-              "email",
-              "appointment_datetime",
-              "platform"
-            ]
+            }
           }
         },
         {
@@ -138,41 +58,35 @@
           }
         },
         {
-          "name": "contact_information",
-          "description": "Capture contact details.",
+          "name": "upsert_lead_information",
+          "description": "Save or update lead's core contact info once all fields are collected.",
           "parameters": {
             "type": "object",
             "properties": {
-              "first_name": { "type": "string" },
-              "last_name": { "type": "string" },
+              "unique_caller_id": { "type": "string" },
+              "full_name": { "type": "string" },
               "email": { "type": "string" },
-              "cell_phone": {
-                "type": "string",
-                "description": "7 or 10 digits"
-              }
-            },
-            "required": ["first_name", "last_name", "email", "cell_phone"]
-          }
-        },
-        {
-          "name": "intake_answers_qualification",
-          "description": "Store structured intake answers and current qualification status.",
-          "parameters": {
-            "type": "object",
-            "properties": {
+              "phone": { "type": "string" },
               "practice_area": {
                 "type": "string",
                 "enum": ["personal_injury", "family_law", "lemon_law"]
               },
-              "answers": { "type": "object" },
-              "qualified": { "type": "boolean" }
+              "summary": { "type": "string" },
+              "source_channel": { "type": "string" }
             },
-            "required": ["practice_area", "answers"]
+            "required": [
+              "unique_caller_id",
+              "full_name",
+              "email",
+              "phone",
+              "practice_area",
+              "source_channel"
+            ]
           }
         },
         {
-          "name": "practice_area_attorney_name",
-          "description": "Return the designated attorney name for a practice area.",
+          "name": "get_practice_area_questions",
+          "description": "Retrieve the ordered question list for a given practice area.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -185,58 +99,128 @@
           }
         },
         {
-          "name": "calendar_booking",
-          "description": "Create a consultation booking.",
+          "name": "save_lead_qa",
+          "description": "Save the completed Q&A for a lead.",
           "parameters": {
             "type": "object",
             "properties": {
-              "attorney_name": { "type": "string" },
-              "start_iso": { "type": "string" },
-              "duration_min": { "type": "integer" },
-              "location": {
-                "type": "string",
-                "description": "in-person or video"
-              },
-              "caller_first_name": { "type": "string" },
-              "caller_last_name": { "type": "string" },
+              "unique_caller_id": { "type": "string" },
               "email": { "type": "string" },
-              "cell_phone": { "type": "string" }
+              "all_q_and_a": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "question": { "type": "string" },
+                    "answer": { "type": "string" },
+                    "id": { "type": ["string", "null"] },
+                    "confidence": { "type": ["number", "null"] },
+                    "timestamp": { "type": ["string", "null"] }
+                  },
+                  "required": ["question", "answer"]
+                }
+              },
+              "practice_area_version": { "type": "string" },
+              "completion_status": { "type": "string" }
             },
             "required": [
-              "attorney_name",
-              "start_iso",
-              "duration_min",
-              "caller_first_name",
-              "caller_last_name"
+              "unique_caller_id",
+              "email",
+              "all_q_and_a",
+              "practice_area_version",
+              "completion_status"
             ]
           }
         },
         {
-          "name": "reschedule_calendar_booking",
-          "description": "Reschedule an existing consultation booking.",
+          "name": "practice_area_attorney_name",
+          "description": "Return the preferred attorney name to book with for the given practice area.",
           "parameters": {
             "type": "object",
             "properties": {
-              "booking_id": { "type": "string" },
-              "new_start_iso": { "type": "string" }
+              "practice_area": {
+                "type": "string",
+                "enum": ["personal_injury", "family_law", "lemon_law"]
+              }
             },
-            "required": ["booking_id", "new_start_iso"]
+            "required": ["practice_area"]
+          }
+        },
+        {
+          "name": "get_next_available_slots",
+          "description": "Return up to N upcoming weekday 9–5 PT slots.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "cal_id": { "type": "string" },
+              "tz_name": { "type": "string", "default": "America/Los_Angeles" },
+              "slot_minutes": { "type": "integer", "default": 30 },
+              "count": { "type": "integer", "default": 2 }
+            },
+            "required": ["cal_id"]
+          }
+        },
+        {
+          "name": "check_slot_and_alternatives",
+          "description": "Validate a proposed PT slot; if unavailable, return closest alternatives.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "proposed_start_iso": { "type": "string" },
+              "cal_id": { "type": "string" },
+              "tz_name": { "type": "string", "default": "America/Los_Angeles" },
+              "slot_minutes": { "type": "integer", "default": 30 },
+              "count": { "type": "integer", "default": 3 }
+            },
+            "required": ["proposed_start_iso", "cal_id"]
+          }
+        },
+        {
+          "name": "save_lead_booking",
+          "description": "Create the calendar event after the caller explicitly confirms an absolute PT date/time.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "unique_caller_id": { "type": "string" },
+              "appointment_datetime": {
+                "type": "string",
+                "description": "Start time in PT ISO (e.g., 2025-09-01T13:30:00-07:00)"
+              },
+              "slot_minutes": { "type": "integer", "default": 30 },
+              "timezone": {
+                "type": "string",
+                "default": "America/Los_Angeles"
+              },
+              "platform": { "type": "string", "default": "video" },
+              "phone_number": { "type": "string" },
+              "email": { "type": "string" },
+              "booked_with": { "type": "string" },
+              "booking_notes": { "type": "string" },
+              "title": { "type": "string", "default": "Consultation" }
+            },
+            "required": [
+              "calendar_id",
+              "unique_caller_id",
+              "appointment_datetime",
+              "email"
+            ]
           }
         },
         {
           "name": "terms_of_engagement_letter",
-          "description": "Send Terms of Engagement link by email and SMS; confirm receipt.",
+          "description": "Send Lemon Law terms/engagement letter before booking.",
           "parameters": {
             "type": "object",
             "properties": {
               "email": { "type": "string" },
               "cell_phone": { "type": "string" }
-            }
+            },
+            "required": ["email", "cell_phone"]
           }
         },
         {
           "name": "send_email",
-          "description": "Send an email message.",
+          "description": "Send a follow-up email.",
           "parameters": {
             "type": "object",
             "properties": {
