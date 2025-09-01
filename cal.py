@@ -12,7 +12,7 @@ CAL_ID = os.getenv("GOOGLE_DEFAULT_CALENDAR_ID", "").strip()      # human calend
 print(f"GOOGLE_DEFAULT_CALENDAR_ID='{CAL_ID}'")
 SA_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()    # full JSON (optional)
 print(f"GOOGLE_SERVICE_ACCOUNT_JSON starts with: '{SA_JSON[:30]}'")
-SA_PATH = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()# path to JSON (optional)
+SA_PATH = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_PATH", "").strip()
 print(f"GOOGLE_SERVICE_ACCOUNT_JSON_PATH='{SA_PATH}'")
 
 if not CAL_ID:
