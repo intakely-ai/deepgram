@@ -10,6 +10,7 @@ from email_sender import send_email_smtp  # real SMTP sender
 from google_calendar_availability import (
     get_next_available_slots as _gc_get_next_slots,
     check_slot_and_alternatives as _gc_check_slot,
+    
 )
 
 # ---------- Env ----------
@@ -479,7 +480,7 @@ async def save_lead_booking(unique_caller_id=None, email=None, appointment_datet
                 print(f"[calendar] normalized past appointment from {orig_start.isoformat()} -> {start_dt.isoformat()}")
 
             normalized_start_dt = start_dt  # for email formatting later
-            end_dt = start_dt + timedelta(minutes=60)
+            end_dt = start_dt + timedelta(minutes=30)
 
             # Calendar ID (no DWD): sanitize and forbid 'primary'
             cal_id = (GOOGLE_DEFAULT_CALENDAR_ID or "").strip().lstrip("=")
@@ -561,6 +562,98 @@ async def save_lead_booking(unique_caller_id=None, email=None, appointment_datet
     _spawn(_sb_insert_async("lead_booking", row))
     return {"ok": True, "unique_caller_id": unique_caller_id, "meeting_link": final_meeting_link, "google_event_id": google_event_id}
 
+def reschedule_lead_booking(
+    unique_caller_id,
+    email,
+    new_appointment_datetime,     # ISO; may include PT offset (-07:00); will be stored as UTC in Calendar
+    booked_with,
+    old_appointment_datetime=None,# ISO; optional if google_event_id is provided
+    google_event_id=None,         # preferred for precise update
+    slot_minutes=30,
+    calendar_id=None,
+    full_name=None,
+    phone_number=None,
+    practice_area=None,
+    platform="video",
+    booking_notes=""
+):
+    """
+    Reschedule an existing consultation to a new time.
+    - Confirms to 30-minute duration (policy).
+    - Stores lead info (name/email/phone/practice area/Caller ID) in the event description.
+    - Notifies attendee via Google (sendUpdates='all').
+    - Returns meeting link & event id.
+
+    Returns: { ok, google_event_id, old_start_iso, new_start_iso, meeting_link, event_html_link }
+    """
+    try:
+        cal_id = calendar_id or os.getenv("GOOGLE_CALENDAR_ID") or ""
+        if not cal_id:
+            return {"ok": False, "error": "Missing calendar id. Set GOOGLE_CALENDAR_ID or pass calendar_id."}
+
+        # Build a friendly summary
+        pa = (practice_area or "").strip()
+        who = (full_name or email or "").strip()
+        summary = f"Consultation – {booked_with}"
+        if pa:
+            summary += f" ({pa})"
+        if who:
+            summary += f" – {who}"
+
+        # Lead info to embed in description
+        desc_fields = {
+            "Name": full_name or "",
+            "Email": email or "",
+            "Phone": phone_number or "",
+            "Practice Area": practice_area or "",
+            "Caller ID": unique_caller_id or "",
+            "Notes": booking_notes or "",
+            "Platform": platform or "",
+        }
+
+        result = _run_coro_blocking(_gc_reschedule_event(
+            cal_id=cal_id,
+            new_start_iso=new_appointment_datetime,
+            slot_minutes=slot_minutes,
+            tz_name="UTC",  # do everything in UTC for robustness
+            google_event_id=google_event_id,
+            old_start_iso=old_appointment_datetime,
+            attendee_email=email,
+            attendee_name=full_name,
+            summary=summary,
+            description_fields=desc_fields
+        ))
+
+        # Optional: email confirmation (keeps your existing style)
+        try:
+            if result.get("ok"):
+                old_txt = result.get("old_start_iso") or (old_appointment_datetime or "")
+                new_txt = result.get("new_start_iso") or new_appointment_datetime
+                meeting_link = result.get("meeting_link") or result.get("event_html_link", "")
+
+                html = f"""Dear {full_name or 'Client'},<br><br>
+                Your consultation with <b>{booked_with}</b> has been <b>rescheduled</b>.<br><br>
+                <b>Old:</b> {old_txt}<br>
+                <b>New:</b> {new_txt} (30 minutes)<br>
+                <b>Platform:</b> {platform}<br>
+                <b>Join:</b> <a href="{meeting_link}">{meeting_link}</a><br><br>
+                If the new time does not work, reply to this email and we’ll find another time.<br><br>
+                — Oakwood Law Firm
+                """
+                _ = send_email({
+                    "to": email,
+                    "subject": "Your Oakwood Consultation Has Been Rescheduled",
+                    "html": html
+                })
+        except Exception:
+            pass
+
+        return result
+
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 # ---------- Safe sync wrapper to avoid event-loop deadlocks ----------
 def _run_coro_blocking(coro):
     import threading
@@ -602,6 +695,307 @@ def check_slot_and_alternatives_sync(proposed_start_iso, count=3, slot_minutes=3
         return _run_coro_blocking(_gc_check_slot(proposed_start_iso=proposed_start_iso, cal_id=cal_id, tz_name=tz_name, slot_minutes=slot_minutes, count=count))
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+# ------------------------------
+# Date-specific slots (per-day)
+# ------------------------------
+def get_slots_for_dates(cal_id, dates, tz_name=None, slot_minutes=30, count_per_day=3):
+    """
+    Synchronous: For each YYYY-MM-DD (PT), return up to `count_per_day` *available* 30-min slots
+    within business hours (Mon–Fri, 9–5 PT). Uses check_slot_and_alternatives_sync so booked
+    times are excluded.
+    """
+    try:
+        from datetime import datetime as dt, timedelta
+        # Resolve timezone
+        tz_name = tz_name or BUSINESS_TZ or "America/Los_Angeles"
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            # Fallback: fixed -7/-8 heuristic by month
+            month = dt.utcnow().month
+            offset = -7 if 3 <= month <= 11 else -8
+            from datetime import timezone as _tz, timedelta as _td
+            tz = _tz(_td(hours=offset))
+
+        now_local = dt.now(tz)
+        out_days = []
+
+        for dstr in dates or []:
+            # Parse date
+            try:
+                y, m, d = map(int, dstr.split("-"))
+                day_local = dt(y, m, d, tzinfo=tz)
+            except Exception:
+                return {"ok": False, "error": f"Bad date format (expected YYYY-MM-DD): {dstr}"}
+
+            # Skip weekends
+            if day_local.weekday() >= 5:
+                out_days.append({"date": dstr, "slots": []})
+                continue
+
+            # Build 30-min candidates 09:00..16:30
+            first = day_local.replace(hour=9, minute=0, second=0, microsecond=0)
+            last_start = day_local.replace(hour=16, minute=30, second=0, microsecond=0)
+
+            slots = []
+            cur = first
+            while cur <= last_start and len(slots) < count_per_day:
+                # Skip past times if the day is today
+                if cur.date() > now_local.date() or cur >= now_local:
+                    proposed_iso = cur.isoformat()
+                    chk = check_slot_and_alternatives_sync(
+                        proposed_start_iso=proposed_iso,
+                        cal_id=cal_id,
+                        tz_name=tz_name,
+                        slot_minutes=slot_minutes,
+                        count=3
+                    )
+                    if chk.get("ok") and chk.get("available"):
+                        end_local = cur + timedelta(minutes=slot_minutes)
+                        label = cur.strftime("%A, %B %d, %Y at %I:%M %p").lstrip("0") + " PT"
+                        slots.append({
+                            "start_iso": cur.isoformat(),
+                            "end_iso": end_local.isoformat(),
+                            "label": label
+                        })
+                cur += timedelta(minutes=slot_minutes)
+
+            out_days.append({"date": dstr, "slots": slots})
+
+        return {"ok": True, "days": out_days}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+# ------------------------------
+# Reschedule an existing booking (Supabase lookup -> Google patch, no attendees / no DWD)
+# ------------------------------
+def reschedule_lead_booking(
+    unique_caller_id,
+    email,
+    booked_with,
+    new_appointment_datetime,
+    old_appointment_datetime=None,
+    google_event_id=None,
+    calendar_id=None,
+    slot_minutes=30,
+    full_name=None,
+    phone_number=None,
+    practice_area=None,
+    platform="video",
+    booking_notes=None
+):
+    """
+    Synchronous: Move an existing event to a new time (30 min).
+    - If google_event_id is not provided, look up in Supabase by (email + old_appointment_datetime).
+    - NO ATTENDEES are added (service account without DWD).
+    - sendUpdates='none' to avoid invite emails.
+    - Supabase: PATCH the existing row by google_event_id; INSERT if not found.
+    """
+    try:
+        import os, json, base64
+        from urllib.parse import quote_plus
+        from datetime import datetime as dt, timedelta, timezone as _tz
+        from google.oauth2.service_account import Credentials
+        from googleapiclient.discovery import build
+        from googleapiclient.errors import HttpError
+
+        # PT timezone (fallback if ZoneInfo unavailable)
+        tz_name = BUSINESS_TZ or "America/Los_Angeles"
+        try:
+            local_tz = ZoneInfo(tz_name)
+        except Exception:
+            month = dt.utcnow().month
+            offset = -7 if 3 <= month <= 11 else -8
+            from datetime import timezone as _tzmod, timedelta as _td
+            local_tz = _tzmod(_td(hours=offset))
+
+        # Parse/guard new time
+        new_start = dtp.isoparse(new_appointment_datetime)
+        if new_start.tzinfo is None:
+            new_start = new_start.replace(tzinfo=local_tz)
+        else:
+            new_start = new_start.astimezone(local_tz)
+        if new_start.weekday() >= 5:
+            return {"ok": False, "error": "Requested day is on a weekend."}
+        if not (9 <= new_start.hour < 17 or (new_start.hour == 17 and new_start.minute == 0)):
+            return {"ok": False, "error": "Requested time is outside 9:00 AM–5:00 PM PT."}
+        new_end = new_start + timedelta(minutes=int(slot_minutes or 30))
+
+        # If event id missing, fetch from Supabase by (email + old time ± 15m)
+        ev_id_source = "arg"
+        if not google_event_id:
+            if not (email and old_appointment_datetime):
+                return {"ok": False, "error": "When google_event_id is not provided, both email and old_appointment_datetime are required."}
+            if not SUPABASE_URL or not SUPABASE_KEY:
+                return {"ok": False, "error": "Supabase env not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE)."}
+
+            old_local = dtp.isoparse(old_appointment_datetime)
+            if old_local.tzinfo is None:
+                old_local = old_local.replace(tzinfo=local_tz)
+            else:
+                old_local = old_local.astimezone(local_tz)
+            window = 15
+            start_z = (old_local - timedelta(minutes=window)).astimezone(_tz.utc).isoformat().replace("+00:00", "Z")
+            end_z   = (old_local + timedelta(minutes=window)).astimezone(_tz.utc).isoformat().replace("+00:00", "Z")
+
+            base = _sb_url("lead_booking")
+            q = (
+                f"{base}?select=google_event_id,appointment_datetime"
+                f"&email=eq.{quote_plus(email)}"
+                f"&appointment_datetime=gte.{quote_plus(start_z)}"
+                f"&appointment_datetime=lte.{quote_plus(end_z)}"
+                f"&order=appointment_datetime.asc&limit=5"
+            )
+            try:
+                r = requests.get(q, headers=_sb_headers(), timeout=15)
+                r.raise_for_status()
+                recs = r.json() if r.text else []
+            except Exception as se:
+                return {"ok": False, "error": f"Supabase lookup failed: {se}"}
+
+            best_id, best_delta = None, None
+            for rec in recs or []:
+                gid = (rec or {}).get("google_event_id")
+                appt = (rec or {}).get("appointment_datetime")
+                if not (gid and appt):
+                    continue
+                try:
+                    appt_dt = dtp.isoparse(appt).astimezone(local_tz)
+                    delta = abs((appt_dt - old_local).total_seconds())
+                    if best_id is None or delta < best_delta:
+                        best_id, best_delta = gid, delta
+                except Exception:
+                    continue
+
+            if not best_id:
+                return {"ok": False, "error": "No matching booking found in Supabase for the provided email and old time (or booking has no google_event_id)."}
+            google_event_id = best_id
+            ev_id_source = "supabase"
+
+        # Google service (JSON string or path)
+        raw = (GOOGLE_SERVICE_ACCOUNT_JSON or "").strip()
+        if not raw:
+            return {"ok": False, "error": "Missing/invalid GOOGLE_SERVICE_ACCOUNT_JSON (JSON string or file path)."}
+        if raw.lstrip().startswith("{"):
+            info = json.loads(raw)
+        elif os.path.exists(raw):
+            with open(raw, "r", encoding="utf-8") as f:
+                info = json.load(f)
+        else:
+            return {"ok": False, "error": "GOOGLE_SERVICE_ACCOUNT_JSON must be a JSON string or a valid path to a JSON file."}
+
+        scopes = ["https://www.googleapis.com/auth/calendar", "https://www.googleapis.com/auth/calendar.events"]
+        creds = Credentials.from_service_account_info(info, scopes=scopes)
+        service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+
+        # Calendar id (human calendar shared with the service account; not 'primary')
+        cal_id = (calendar_id or GOOGLE_DEFAULT_CALENDAR_ID or "").strip().lstrip("=")
+        if not cal_id or cal_id.lower() == "primary":
+            for env_cal in (ATTORNEY_PI_CALENDAR_ID, ATTORNEY_FAMILY_CALENDAR_ID, ATTORNEY_LEMON_CALENDAR_ID):
+                if env_cal:
+                    cal_id = str(env_cal).strip().lstrip("=")
+                    break
+        if not cal_id or cal_id.lower() == "primary":
+            return {"ok": False, "error": "Missing calendar id. Set GOOGLE_DEFAULT_CALENDAR_ID to a human calendar shared with the service account."}
+
+        # Build patch (NO attendees)
+        description_lines = [
+            f"Lead: {full_name or '—'} <{email}>",
+            f"Phone: {phone_number or '—'}",
+            f"Practice Area: {practice_area or '—'}",
+            f"Unique Caller ID: {unique_caller_id}",
+        ]
+        if booking_notes:
+            description_lines.append(f"Notes: {booking_notes}")
+        if old_appointment_datetime:
+            description_lines.append(f"Rescheduled from: {old_appointment_datetime}")
+
+        patch = {
+            "summary": f"Consultation – {booked_with}",
+            "description": "\n".join(description_lines),
+            "start": {"dateTime": new_start.isoformat(), "timeZone": tz_name},
+            "end":   {"dateTime": new_end.isoformat(),   "timeZone": tz_name},
+            # NO "attendees" in no-DWD mode
+        }
+
+        updated = service.events().patch(
+            calendarId=cal_id,
+            eventId=google_event_id,
+            body=patch,
+            sendUpdates="none"  # no emails; service account cannot invite without DWD
+        ).execute()
+
+        used_event_id = updated.get("id") or google_event_id
+        html_link = updated.get("htmlLink")
+        # Canonical link (eid = base64url("{eventId} {calendarId}"))
+        try:
+            eid = base64.urlsafe_b64encode(f"{used_event_id} {cal_id}".encode("utf-8")).decode("ascii").rstrip("=")
+            html_link = f"https://calendar.google.com/calendar/event?eid={eid}"
+        except Exception:
+            pass
+
+        # -------- Supabase: UPDATE then fallback to INSERT --------
+        try:
+            # Data to persist
+            payload = {
+                "unique_caller_id": unique_caller_id,
+                "email": email,
+                "appointment_datetime": new_start.astimezone(_tz.utc).isoformat().replace("+00:00", "Z"),
+                "timezone": tz_name,
+                "platform": platform,
+                "meeting_link": html_link,
+                "phone_number": phone_number,
+                "booked_with": booked_with,
+                "booking_notes": booking_notes or "",
+                "google_event_id": used_event_id,
+                "updated_at": _utc_now_iso(),
+                "note": f"rescheduled via {ev_id_source}"
+            }
+
+            # Try PATCH existing row by google_event_id
+            url = _sb_url("lead_booking") + f"?google_event_id=eq.{quote_plus(used_event_id)}"
+            r = requests.patch(url, headers=_sb_headers(), data=json.dumps(payload), timeout=15)
+
+            # If no row updated (empty [] or 204 with no content), fallback to INSERT
+            do_insert = False
+            if r.status_code in (200, 201):
+                try:
+                    body = r.json()
+                    if isinstance(body, list) and len(body) == 0:
+                        do_insert = True
+                except Exception:
+                    # some setups return 204 even though we set Prefer; treat as success
+                    pass
+            elif r.status_code == 204:
+                # 204 No Content -> assume success (row existed)
+                pass
+            else:
+                do_insert = True
+
+            if do_insert:
+                ins_payload = dict(payload)
+                ins_payload.setdefault("created_at", _utc_now_iso())
+                _ = _sb_insert("lead_booking", ins_payload)
+        except Exception as db_e:
+            print(f"[supabase] reschedule upsert failed: {db_e}")
+
+        return {
+            "ok": True,
+            "google_event_id": used_event_id,
+            "meeting_link": html_link,
+            "new_appointment_datetime": new_start.isoformat()
+        }
+
+    except HttpError as he:
+        try:
+            body = he.content.decode() if hasattr(he, "content") and isinstance(he.content, (bytes, bytearray)) else str(he)
+        except Exception:
+            body = str(he)
+        return {"ok": False, "error": f"Google API error: {body}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 
 def save_lead_booking_sync(**kwargs):
     """Sync wrapper for async save_lead_booking that won't deadlock if a loop is running."""
@@ -675,4 +1069,6 @@ FUNCTION_MAP = {
     "check_slot_and_alternatives": check_slot_and_alternatives_sync,
 
     "get_current_datetime": get_current_datetime,
+    "get_slots_for_dates": get_slots_for_dates,
+    "reschedule_lead_booking": reschedule_lead_booking,
 }

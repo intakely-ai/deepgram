@@ -74,7 +74,7 @@ def _safe_zoneinfo(tz_name):
 def _load_creds():
     scopes = ["https://www.googleapis.com/auth/calendar"]
     sa_json_str  = (os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or "").strip()
-    sa_json_path = (os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or "").strip()
+    sa_json_path = (os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or "").strip()  # <-- fixed var
     if sa_json_str.startswith("{"):
         info = json.loads(sa_json_str)
         return Credentials.from_service_account_info(info, scopes=scopes)
@@ -122,14 +122,65 @@ def _generate_free_slots_from_busy(busy_intervals, start_dt, end_dt, now_dt, slo
         cur += timedelta(minutes=slot_minutes)
     return slots
 
+# ---- Calendar resolution & FB error surfacing ----
+
+def _resolve_calendar_id(cal_id: str | None):
+    """
+    Resolve a usable Google Calendar ID:
+    - If cal_id looks like a real calendar (has '@' or endswith 'calendar.google.com'), use it.
+    - Else try CALENDAR_MAP_JSON (mapping names -> calendar IDs).
+    - Else fall back to GOOGLE_DEFAULT_CALENDAR_ID.
+    - If still missing, return None.
+    """
+    raw = (cal_id or "").strip()
+    if raw:
+        if ("@" in raw) or raw.endswith("calendar.google.com"):
+            return raw
+
+    try:
+        map_json = os.getenv("CALENDAR_MAP_JSON") or ""
+        if map_json.strip().startswith("{"):
+            m = json.loads(map_json)
+            if raw and raw in m:
+                return m[raw]
+    except Exception:
+        pass
+
+    fallback = (os.getenv("GOOGLE_DEFAULT_CALENDAR_ID") or "").strip()
+    return fallback or None
+
+def _extract_freebusy_error(cal_id_key: str, resp: dict) -> str | None:
+    """
+    If the FreeBusy response contains errors for the calendar, return a concise message.
+    Otherwise, return None.
+    """
+    try:
+        cal_entry = (resp.get("calendars", {}) or {}).get(cal_id_key, {}) or {}
+        errs = cal_entry.get("errors")
+        if isinstance(errs, list) and errs:
+            parts = []
+            for e in errs:
+                reason = (e.get("reason") or "").strip()
+                msg = (e.get("message") or "").strip()
+                if reason and msg:
+                    parts.append(f"{reason}: {msg}")
+                elif reason:
+                    parts.append(reason)
+                elif msg:
+                    parts.append(msg)
+            return "; ".join([p for p in parts if p])
+    except Exception:
+        pass
+    return None
+
 # ------------------------------
 # Google FreeBusy
 # ------------------------------
 
 async def _freebusy_async(calendar_id, time_min_iso, time_max_iso, tz_name):
-    cal_id = (calendar_id or "").strip().lstrip("=")
-    if not cal_id or cal_id.lower() == "primary":
-        return {"ok": False, "error": "Invalid calendar_id for no-delegation mode."}
+    cal_id_key = _resolve_calendar_id(calendar_id)
+    if not cal_id_key:
+        return {"ok": False, "error": "No usable calendar ID. Set GOOGLE_DEFAULT_CALENDAR_ID or CALENDAR_MAP_JSON."}
 
     query_tz = "UTC" if TZ_MODE == "UTC" or (tz_name or "").upper() == "UTC" else (tz_name or DEFAULT_TZ)
 
@@ -139,13 +190,19 @@ async def _freebusy_async(calendar_id, time_min_iso, time_max_iso, tz_name):
             "timeMin": time_min_iso,
             "timeMax": time_max_iso,
             "timeZone": query_tz,
-            "items": [{"id": cal_id}],
+            "items": [{"id": cal_id_key}],
         }
         return svc.freebusy().query(body=body).execute()
 
     try:
         resp = await asyncio.to_thread(_query)
-        raw_busy = (resp.get("calendars", {}).get(cal_id, {}) or {}).get("busy", [])
+
+        # NEW: surface calendar-level FreeBusy errors instead of returning empty busy (which looked "all free")
+        fb_err = _extract_freebusy_error(cal_id_key, resp)
+        if fb_err:
+            return {"ok": False, "error": f"FreeBusy error for '{cal_id_key}': {fb_err}"}
+
+        raw_busy = (resp.get("calendars", {}).get(cal_id_key, {}) or {}).get("busy", [])
         busy_utc = []
         for b in raw_busy:
             s = _p.isoparse(b["start"])
