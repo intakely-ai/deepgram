@@ -1,8 +1,12 @@
 # law_functions.py
 
 import os, json, uuid, requests, asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo  # Python 3.9+
+import os, json, re
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from dateutil import parser as dtp  # keep if you plan to parse dates later
 
@@ -140,7 +144,8 @@ async def _google_create_event_async(calendar_id, summary, description, start_is
     from googleapiclient.errors import HttpError
 
     sa_json_str  = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
-    sa_json_path = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    sa_json_path = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_PATH", "").strip()
+
 
     def _load_creds():
         scopes = ["https://www.googleapis.com/auth/calendar", "https://www.googleapis.com/auth/calendar.events"]
@@ -199,6 +204,44 @@ async def _google_create_event_async(calendar_id, summary, description, start_is
     # Run in worker thread to avoid event-loop conflicts
     return await asyncio.to_thread(_insert_event_sync)
 
+
+def _google_update_event(calendar_id, event_id, new_start_iso, duration_min=30, tz="America/Los_Angeles"):
+    sa_json_str  = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    sa_json_path = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_PATH", "").strip()
+    scopes = ["https://www.googleapis.com/auth/calendar", "https://www.googleapis.com/auth/calendar.events"]
+
+    if sa_json_str.startswith("{"):
+        info = json.loads(sa_json_str)
+        creds = Credentials.from_service_account_info(info, scopes=scopes)
+    elif sa_json_path:
+        with open(sa_json_path, "r", encoding="utf-8") as f:
+            info = json.load(f)
+        creds = Credentials.from_service_account_info(info, scopes=scopes)
+    else:
+        return {"ok": False, "error": "No service account creds."}
+
+    try:
+        service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+        # Get the event
+        event = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+        # Update start/end
+        event["start"]["dateTime"] = new_start_iso
+        event["start"]["timeZone"] = tz
+        from dateutil import parser as dtp
+        start_dt = dtp.isoparse(new_start_iso)
+        end_dt = start_dt + timedelta(minutes=duration_min)
+        event["end"]["dateTime"] = end_dt.isoformat()
+        event["end"]["timeZone"] = tz
+        updated = service.events().update(calendarId=calendar_id, eventId=event_id, body=event).execute()
+        return {"ok": True, "eventId": updated.get("id"), "htmlLink": updated.get("htmlLink")}
+    except HttpError as he:
+        body = he.content.decode() if hasattr(he, "content") and isinstance(he.content, (bytes, bytearray)) else str(he)
+        return {"ok": False, "error": f"Google API error: {body}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+    
 # ---------- Agent-callable functions ----------
 
 def practice_area(practice_area):
@@ -248,13 +291,25 @@ def calendar_booking(attorney_name, start_iso, duration_min, caller_first_name, 
     }
     return {"ok": True, "booking_id": booking_ref, **row}
 
-def reschedule_calendar_booking(booking_id, new_start_iso):
+def reschedule_calendar_booking(booking_id, new_start_iso, calendar_id=None, event_id=None, duration_min=30, tz="America/Los_Angeles"):
+    # Lookup calendar_id and event_id if not provided (from Supabase or context)
+    # For now, require both as arguments
+    if not calendar_id or not event_id:
+        return {"ok": False, "error": "calendar_id and event_id required for rescheduling."}
+    result = _google_update_event(calendar_id, event_id, new_start_iso, duration_min, tz)
+    # Log to Supabase
     _sb_insert("crm_updates", {
-        "fields": {"event": "reschedule_requested", "booking_id": booking_id, "new_start_iso": new_start_iso},
+        "fields": {
+            "event": "reschedule_requested",
+            "booking_id": booking_id,
+            "new_start_iso": new_start_iso,
+            "calendar_id": calendar_id,
+            "event_id": event_id,
+            "google_result": result,
+        },
         "created_at": _utc_now_iso()
     })
-    return {"ok": True, "booking_id": booking_id, "new_start_iso": new_start_iso, "note": "reschedule logged; calendar not wired yet"}
-
+    return {"ok": True, "booking_id": booking_id, "new_start_iso": new_start_iso, "google_result": result}
 def terms_of_engagement_letter(email=None, cell_phone=None, cc=None):
     html = "<p>Please review and sign the attached Terms of Engagement (placeholder).</p>"
     subj = "Terms of Engagement (Oakwood Law Firm)"
@@ -406,10 +461,30 @@ def upsert_lead_information(unique_caller_id=None, full_name=None, email=None, p
 def save_lead_qa(unique_caller_id=None, email=None, all_q_and_a=None, practice_area_version=None, completion_status="complete"):
     """Insert a Q&A capture row for this call (one write)."""
     now = _utc_now_iso()
+    
+    # For returning clients, try to find their existing unique_caller_id
+    if not unique_caller_id and email:
+        # Try to find their existing unique_caller_id from lead_information table
+        if SUPABASE_URL and SUPABASE_KEY:
+            headers = _sb_headers()
+            url = f"{SUPABASE_URL}/rest/v1/lead_information?email=eq.{email}&select=unique_caller_id&limit=1"
+            try:
+                resp = requests.get(url, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data and data[0].get("unique_caller_id"):
+                        unique_caller_id = data[0].get("unique_caller_id")
+                        print(f"[DEBUG] Found existing unique_caller_id: {unique_caller_id} for email: {email}")
+            except Exception as e:
+                print(f"[ERROR] Could not fetch unique_caller_id: {e}")
+    
+    # If still no unique_caller_id, generate one
+    unique_caller_id = _normalize_caller_id(unique_caller_id)
+    
     # Coerce list
     if all_q_and_a is None:
         all_q_and_a = []
-    unique_caller_id = _normalize_caller_id(unique_caller_id)
+    
     row = {
         "unique_caller_id": unique_caller_id,
         "email": email,
@@ -421,7 +496,6 @@ def save_lead_qa(unique_caller_id=None, email=None, all_q_and_a=None, practice_a
     }
     _spawn(_sb_insert_async("lead_qa", row))
     return {"ok": True, "unique_caller_id": unique_caller_id}
-
 async def save_lead_booking(unique_caller_id=None, email=None, appointment_datetime=None, timezone=None, platform=None,
                             meeting_link=None, phone_number=None, booked_with=None, booking_notes=None):
     """Insert a booking row for this call after Q&A completion. Also tries Google Calendar and sends a confirmation email."""
@@ -434,7 +508,7 @@ async def save_lead_booking(unique_caller_id=None, email=None, appointment_datet
     # Allow either JSON string or JSON file path
     import os as _os
     sa_json_str  = _os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-    sa_json_path = _os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    sa_json_path = _os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_PATH", "")
     have_google_creds = bool(sa_json_str or sa_json_path)
 
     # Will use this for the email formatting so it reflects any normalization
@@ -1046,6 +1120,120 @@ def get_practice_area_questions(practice_area):
         "practice_area_version": version_map.get(pa),
         "questions": questions_map.get(pa, [])
     }
+def get_calendar_id_by_practice_area(practice_area):
+    """
+    Return the appropriate calendar ID based on practice area.
+    """
+    mapping = {
+        "personal_injury": ATTORNEY_PI_CALENDAR_ID or GOOGLE_DEFAULT_CALENDAR_ID,
+        "family_law": ATTORNEY_FAMILY_CALENDAR_ID or GOOGLE_DEFAULT_CALENDAR_ID,
+        "lemon_law": ATTORNEY_LEMON_CALENDAR_ID or GOOGLE_DEFAULT_CALENDAR_ID
+    }
+    
+    calendar_id = mapping.get(practice_area, GOOGLE_DEFAULT_CALENDAR_ID)
+    if not calendar_id:
+        return {"ok": False, "error": f"No calendar configured for practice area: {practice_area}"}
+    
+    return {"ok": True, "calendar_id": calendar_id}
+def get_booking_info_by_email(email):
+    """
+    Retrieve comprehensive information for a returning client by email.
+    Returns booking history, practice area, and contact information.
+    """
+    import re
+    
+    # Validate email format
+    email_regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    if not re.match(email_regex, email):
+        return {"ok": False, "error": "Invalid email format"}
+    
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return {"ok": False, "error": "Supabase credentials missing."}
+    
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    # Get client information from lead_information
+    client_info = {}
+    try:
+        info_url = f"{SUPABASE_URL}/rest/v1/lead_information?email=eq.{email}&order=updated_at.desc&limit=1"
+        info_resp = requests.get(info_url, headers=headers)
+        if info_resp.status_code == 200:
+            info_data = info_resp.json()
+            if info_data:
+                client_info = info_data[0]
+    except Exception as e:
+        print(f"[ERROR] Could not fetch client info: {e}")
+    
+    # Get booking history
+    bookings = []
+    try:
+        bookings_url = f"{SUPABASE_URL}/rest/v1/lead_booking?email=eq.{email}&order=created_at.desc"
+        bookings_resp = requests.get(bookings_url, headers=headers)
+        if bookings_resp.status_code == 200:
+            bookings = bookings_resp.json()
+    except Exception as e:
+        print(f"[ERROR] Could not fetch bookings: {e}")
+    
+    # Get most recent practice area from lead_qa
+    current_practice_area = None
+    try:
+        qa_url = f"{SUPABASE_URL}/rest/v1/lead_qa?email=eq.{email}&order=created_at.desc&limit=1"
+        qa_resp = requests.get(qa_url, headers=headers)
+        if qa_resp.status_code == 200:
+            qa_data = qa_resp.json()
+            if qa_data:
+                current_practice_area = qa_data[0].get("practice_area")
+    except Exception as e:
+        print(f"[ERROR] Could not fetch practice area: {e}")
+    
+    # If no practice area from QA, try to get it from client info
+    if not current_practice_area and client_info:
+        current_practice_area = client_info.get("practice_area")
+    
+    # Get the most recent booking for backward compatibility
+    most_recent_booking = bookings[0] if bookings else {}
+    
+    return {
+        "ok": True,
+        "client_info": client_info,
+        "bookings": bookings,
+        "current_practice_area": current_practice_area,
+        "email": email,
+        # Backward compatibility fields
+        "booking_id": most_recent_booking.get("id"),
+        "calendar_id": most_recent_booking.get("calendar_id"),
+        "event_id": most_recent_booking.get("google_event_id"),
+        "start_iso": most_recent_booking.get("appointment_datetime"),
+        "details": most_recent_booking
+    }
+def update_client_practice_area(unique_caller_id, email, new_practice_area):
+    """
+    Update a client's practice area in the database.
+    """
+    if not unique_caller_id or not email:
+        return {"ok": False, "error": "Missing required parameters"}
+    
+    # Update lead_information table
+    update_data = {
+        "practice_area": new_practice_area,
+        "updated_at": _utc_now_iso()
+    }
+    
+    # Use upsert to update the record
+    result = _sb_upsert(
+        "lead_information", 
+        {"unique_caller_id": unique_caller_id, "email": email, **update_data},
+        on_conflict="unique_caller_id"
+    )
+    
+    if result.get("ok"):
+        return {"ok": True, "message": "Practice area updated successfully"}
+    else:
+        return {"ok": False, "error": result.get("error", "Failed to update practice area")}
 
 FUNCTION_MAP = {
     "practice_area": practice_area,
@@ -1057,18 +1245,15 @@ FUNCTION_MAP = {
     "terms_of_engagement_letter": terms_of_engagement_letter,
     "send_email": send_email,  # real email now
 
-    # Intake Agent
     "create_or_get_caller_id": create_or_get_caller_id,
     "upsert_lead_information": upsert_lead_information,
     "save_lead_qa": save_lead_qa,
     "save_lead_booking": save_lead_booking_sync,
     "get_practice_area_questions": get_practice_area_questions,
-
-    
+    "get_booking_info_by_email": get_booking_info_by_email,
+    "update_client_practice_area": update_client_practice_area,
     "get_next_available_slots": get_next_available_slots_sync,
     "check_slot_and_alternatives": check_slot_and_alternatives_sync,
-
     "get_current_datetime": get_current_datetime,
-    "get_slots_for_dates": get_slots_for_dates,
-    "reschedule_lead_booking": reschedule_lead_booking,
+    "get_calendar_id_by_practice_area": get_calendar_id_by_practice_area
 }

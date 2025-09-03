@@ -74,7 +74,7 @@ def _safe_zoneinfo(tz_name):
 def _load_creds():
     scopes = ["https://www.googleapis.com/auth/calendar"]
     sa_json_str  = (os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or "").strip()
-    sa_json_path = (os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or "").strip()  # <-- fixed var
+    sa_json_path = (os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_PATH") or "").strip()
     if sa_json_str.startswith("{"):
         info = json.loads(sa_json_str)
         return Credentials.from_service_account_info(info, scopes=scopes)
@@ -83,7 +83,6 @@ def _load_creds():
             info = json.load(f)
         return Credentials.from_service_account_info(info, scopes=scopes)
     raise RuntimeError("No service account creds. Set GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_JSON_PATH.")
-
 def _build_service():
     creds = _load_creds()
     return build("calendar", "v3", credentials=creds, cache_discovery=False)
