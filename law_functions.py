@@ -11,11 +11,31 @@ from googleapiclient.errors import HttpError
 from dateutil import parser as dtp  # keep if you plan to parse dates later
 
 from email_sender import send_email_smtp  # real SMTP sender
-from google_calendar_availability import (
-    get_next_available_slots as _gc_get_next_slots,
-    check_slot_and_alternatives as _gc_check_slot,
-    reschedule_event as _gc_reschedule_event,  # <--- added import
-)
+
+import importlib, logging
+
+_gca = None
+try:
+    _gca = importlib.import_module("google_calendar_availability")
+except Exception:
+    logging.warning("google_calendar_availability module not importable; calendar features will be disabled.")
+
+_gc_get_next_slots = getattr(_gca, "get_next_available_slots", None)
+_gc_check_slot = getattr(_gca, "check_slot_and_alternatives", None)
+
+# Try several common names for the reschedule helper
+_gc_reschedule_event = None
+if _gca is not None:
+    for name in ("reschedule_event", "reschedule_booking", "reschedule"):
+        _gc_reschedule_event = getattr(_gca, name, None)
+        if _gc_reschedule_event:
+            break
+
+if not (_gc_get_next_slots and _gc_check_slot and _gc_reschedule_event):
+    logging.debug(
+        "google_calendar_availability: get_next_available_slots=%s, check_slot_and_alternatives=%s, reschedule=%s",
+        bool(_gc_get_next_slots), bool(_gc_check_slot), bool(_gc_reschedule_event)
+    )
 
 # ---------- Env ----------
 SUPABASE_URL    = os.getenv("SUPABASE_URL")
