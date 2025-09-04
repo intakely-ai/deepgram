@@ -690,17 +690,17 @@ async def save_lead_booking(unique_caller_id=None, email=None, appointment_datet
 def reschedule_lead_booking(
     unique_caller_id,
     email,
-    new_appointment_datetime,     # ISO; may include PT offset (-07:00); will be stored as UTC in Calendar
     booked_with,
-    old_appointment_datetime=None,# ISO; optional if google_event_id is provided
-    google_event_id=None,         # preferred for precise update
-    slot_minutes=30,
+    new_appointment_datetime,
+    old_appointment_datetime=None,
+    google_event_id=None,
     calendar_id=None,
+    slot_minutes=30,
     full_name=None,
     phone_number=None,
     practice_area=None,
     platform="video",
-    booking_notes=""
+    booking_notes=None
 ):
     """
     Reschedule an existing consultation to a new time.
@@ -809,17 +809,75 @@ def get_next_available_slots_sync(count=3, slot_minutes=30, horizon_days=21, tz_
     cal_id = cal_id or (GOOGLE_DEFAULT_CALENDAR_ID or "")
     tz_name = tz_name or BUSINESS_TZ
     try:
-        return _run_coro_blocking(_gc_get_next_slots(cal_id=cal_id, tz_name=tz_name, slot_minutes=slot_minutes, count=count, horizon_days=horizon_days))
+        # Prefer provider if available
+        if _gc_get_next_slots:
+            return _run_coro_blocking(_gc_get_next_slots(cal_id=cal_id, tz_name=tz_name, slot_minutes=slot_minutes, count=count, horizon_days=horizon_days))
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        # fall through to local fallback
+        logging.exception("google_calendar_availability get_next_available_slots failed: %s", e)
+
+    # Fallback: generate simple weekday 9:00–16:30 PT slots
+    try:
+        from datetime import datetime as dt
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = timezone.utc
+        now_local = dt.now(tz)
+        slots = []
+        candidate = now_local
+        # start at next business slot earliest available
+        if candidate.hour >= 16 and candidate.minute > 30:
+            candidate = (candidate + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+        else:
+            candidate = candidate.replace(hour=9, minute=0, second=0, microsecond=0)
+        while len(slots) < count and (candidate.date() - now_local.date()).days <= horizon_days:
+            if candidate.weekday() < 5:
+                start = candidate
+                while start.hour < 17 and len(slots) < count:
+                    if start > now_local:
+                        slots.append({
+                            "start_iso": start.isoformat(),
+                            "end_iso": (start + timedelta(minutes=slot_minutes)).isoformat(),
+                            "label": start.strftime("%A, %B %d, %Y at %I:%M %p").lstrip("0") + " PT"
+                        })
+                    start = start + timedelta(minutes=slot_minutes)
+            candidate = (candidate + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+        return {"ok": True, "slots": slots}
+    except Exception as fe:
+        return {"ok": False, "error": f"Availability fallback failed: {fe}"}
+
 
 def check_slot_and_alternatives_sync(proposed_start_iso, count=3, slot_minutes=30, tz_name=None, cal_id=None):
     cal_id = cal_id or (GOOGLE_DEFAULT_CALENDAR_ID or "")
     tz_name = tz_name or BUSINESS_TZ
     try:
-        return _run_coro_blocking(_gc_check_slot(proposed_start_iso=proposed_start_iso, cal_id=cal_id, tz_name=tz_name, slot_minutes=slot_minutes, count=count))
+        if _gc_check_slot:
+            return _run_coro_blocking(_gc_check_slot(proposed_start_iso=proposed_start_iso, cal_id=cal_id, tz_name=tz_name, slot_minutes=slot_minutes, count=count))
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        logging.exception("google_calendar_availability check failed: %s", e)
+
+    # Basic local validation fallback:
+    try:
+        candidate = dtp.isoparse(proposed_start_iso)
+        try:
+            tz = ZoneInfo(tz_name)
+            if candidate.tzinfo is None:
+                candidate = candidate.replace(tzinfo=tz)
+            else:
+                candidate = candidate.astimezone(tz)
+        except Exception:
+            pass
+        # weekend guard
+        if candidate.weekday() >= 5:
+            return {"ok": True, "available": False, "reason": "Requested time is on a weekend."}
+        # business hours guard 9:00-17:00 (end exclusive)
+        if not (9 <= candidate.hour < 17 or (candidate.hour == 17 and candidate.minute == 0)):
+            return {"ok": True, "available": False, "reason": "Requested time is outside 9:00 AM–5:00 PM PT."}
+        # If we reach here, optimistic "available" (no provider check)
+        return {"ok": True, "available": True, "note": "No calendar provider; optimistic availability"}
+    except Exception as e:
+        return {"ok": False, "error": f"Slot check failed: {e}"}
 
 # ------------------------------
 # Date-specific slots (per-day)
@@ -1190,75 +1248,86 @@ def get_booking_info_by_email(email):
     """
     Retrieve comprehensive information for a returning client by email.
     Returns booking history, practice area, and contact information.
+    Adds guards: return explicit not-found if no records; mark booking as past/future using PT.
     """
     import re
-
-    # Validate email format
     email_regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    if not re.match(email_regex, email):
+    if not re.match(email_regex, (email or "")):
         return {"ok": False, "error": "Invalid email format"}
-
     if not SUPABASE_URL or not SUPABASE_KEY:
         return {"ok": False, "error": "Supabase credentials missing."}
-
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json"
     }
-
-    # Get client information from lead_information
     client_info = {}
+    bookings = []
     try:
         info_url = f"{SUPABASE_URL}/rest/v1/lead_information?email=eq.{email}&order=updated_at.desc&limit=1"
-        info_resp = requests.get(info_url, headers=headers)
+        info_resp = requests.get(info_url, headers=headers, timeout=10)
         if info_resp.status_code == 200:
-            info_data = info_resp.json()
+            info_data = info_resp.json() or []
             if info_data:
                 client_info = info_data[0]
     except Exception as e:
-        print(f"[ERROR] Could not fetch client info: {e}")
-
-    # Get booking history
-    bookings = []
+        logging.exception("Could not fetch client info: %s", e)
     try:
         bookings_url = f"{SUPABASE_URL}/rest/v1/lead_booking?email=eq.{email}&order=created_at.desc"
-        bookings_resp = requests.get(bookings_url, headers=headers)
+        bookings_resp = requests.get(bookings_url, headers=headers, timeout=10)
         if bookings_resp.status_code == 200:
-            bookings = bookings_resp.json()
+            bookings = bookings_resp.json() or []
     except Exception as e:
-        print(f"[ERROR] Could not fetch bookings: {e}")
-
-    # Get most recent practice area from lead_qa
+        logging.exception("Could not fetch bookings: %s", e)
     current_practice_area = None
     try:
         qa_url = f"{SUPABASE_URL}/rest/v1/lead_qa?email=eq.{email}&order=created_at.desc&limit=1"
-        qa_resp = requests.get(qa_url, headers=headers)
+        qa_resp = requests.get(qa_url, headers=headers, timeout=10)
         if qa_resp.status_code == 200:
-            qa_data = qa_resp.json()
+            qa_data = qa_resp.json() or []
             if qa_data:
                 current_practice_area = qa_data[0].get("practice_area")
     except Exception as e:
-        print(f"[ERROR] Could not fetch practice area: {e}")
-
-    # If no practice area from QA, try to get it from client info
+        logging.exception("Could not fetch practice area: %s", e)
     if not current_practice_area and client_info:
         current_practice_area = client_info.get("practice_area")
-
-    # Get the most recent booking for backward compatibility
+    # If nothing was found, return a clear not-found
+    if not client_info and not bookings:
+        return {"ok": False, "error": "No client or booking records found for that email."}
+    # Normalize most recent booking and mark past/future relative to PT now
     most_recent_booking = bookings[0] if bookings else {}
-
+    start_iso = most_recent_booking.get("appointment_datetime")
+    booking_is_future = None
+    booking_parsed_iso = None
+    if start_iso:
+        try:
+            booking_parsed = dtp.isoparse(start_iso)
+            try:
+                pt_zone = ZoneInfo(BUSINESS_TZ)
+                if booking_parsed.tzinfo is None:
+                    booking_parsed = booking_parsed.replace(tzinfo=pt_zone)
+                else:
+                    booking_parsed = booking_parsed.astimezone(pt_zone)
+                booking_parsed_iso = booking_parsed.isoformat()
+                now_pt = dtp.isoparse(get_current_datetime()["pt_iso"])
+                booking_is_future = booking_parsed >= now_pt
+            except Exception:
+                booking_is_future = None
+        except Exception:
+            booking_parsed_iso = None
+            booking_is_future = None
     return {
         "ok": True,
         "client_info": client_info,
         "bookings": bookings,
         "current_practice_area": current_practice_area,
         "email": email,
-        # Backward compatibility fields
         "booking_id": most_recent_booking.get("id"),
         "calendar_id": most_recent_booking.get("calendar_id"),
         "event_id": most_recent_booking.get("google_event_id"),
-        "start_iso": most_recent_booking.get("appointment_datetime"),
+        "start_iso": start_iso,
+        "start_iso_parsed_pt": booking_parsed_iso,
+        "booking_is_future": booking_is_future,
         "details": most_recent_booking
     }
 def update_client_practice_area(unique_caller_id, email, new_practice_area):
