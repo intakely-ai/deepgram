@@ -181,8 +181,6 @@ async def _google_create_event_async(calendar_id, summary, description, start_is
     - Requires calendar_id to be a HUMAN calendar that is shared with the service account.
     - No attendees, no Meet in no-DWD mode.
     """
-    from googleapiclient.errors import HttpError
-
     def _insert_event_sync():
         cal_id = (calendar_id or "").strip().lstrip("=")
         if not cal_id:
@@ -215,124 +213,10 @@ async def _google_create_event_async(calendar_id, summary, description, start_is
 
     return await asyncio.to_thread(_insert_event_sync)
 
-def _google_update_event(calendar_id, event_id, new_start_iso, duration_min=30, tz="America/Los_Angeles"):
-    """
-    Update an existing Google Calendar event to a new start time (duration fixed).
-    No attendees; no sendUpdates (service account without DWD).
-    """
-    creds = _load_google_creds()
-    if not creds:
-        return {"ok": False, "error": "No service account creds."}
-
-    try:
-        service = build("calendar", "v3", credentials=creds, cache_discovery=False)
-        event = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
-
-        event["start"]["dateTime"] = new_start_iso
-        event["start"]["timeZone"] = tz
-        start_dt = dtp.isoparse(new_start_iso)
-        end_dt = start_dt + timedelta(minutes=duration_min)
-        event["end"]["dateTime"] = end_dt.isoformat()
-        event["end"]["timeZone"] = tz
-
-        updated = service.events().update(calendarId=calendar_id, eventId=event_id, body=event).execute()
-        return {"ok": True, "eventId": updated.get("id"), "htmlLink": updated.get("htmlLink")}
-    except HttpError as he:
-        body = he.content.decode() if hasattr(he, "content") and isinstance(he.content, (bytes, bytearray)) else str(he)
-        return {"ok": False, "error": f"Google API error: {body}"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
 # ---------------- Agent-callable functions ----------------
 def practice_area(practice_area):
     # No DB write here; legacy table 'leads' may not exist. Only echo back.
     return {"ok": True, "practice_area": practice_area}
-
-def contact_information(first_name, last_name, email, cell_phone):
-    row = {
-        "first_name": first_name,
-        "last_name": last_name,
-        "email": email,
-        "cell_phone": cell_phone,
-        "created_at": _utc_now_iso()
-    }
-    _sb_insert("leads", row)
-    return {"ok": True, **row}
-
-def intake_answers_qualification(practice_area, answers, qualified=False):
-    _sb_insert("intakes", {
-        "practice_area": practice_area,
-        "answers": answers,
-        "qualified": qualified,
-        "created_at": _utc_now_iso()
-    })
-    return {"ok": True, "qualified": qualified}
-
-def practice_area_attorney_name(practice_area):
-    mapping = {"personal_injury": "John Doe", "lemon_law": "Jane Roe", "family_law": "Rhonda Fernandez"}
-    return {"ok": True, "attorney_name": mapping.get(practice_area)}
-
-def calendar_booking(attorney_name, start_iso, duration_min, caller_first_name, caller_last_name, email=None, cell_phone=None, location=None):
-    # Keep calendar mock and avoid writing to non-existent 'bookings' table;
-    # saving occurs via save_lead_booking after confirmation.
-    booking_ref = f"bk_{uuid.uuid4().hex[:10]}"
-    row = {
-        "booking_ref": booking_ref,
-        "attorney_name": attorney_name,
-        "start_iso": start_iso,
-        "duration_min": duration_min,
-        "location": location or "In-person",
-        "first_name": caller_first_name,
-        "last_name": caller_last_name,
-        "email": email,
-        "cell_phone": cell_phone,
-        "status": "pending",
-        "created_at": _utc_now_iso(),
-    }
-    return {"ok": True, "booking_id": booking_ref, **row}
-
-def reschedule_calendar_booking(booking_id, new_start_iso, calendar_id=None, event_id=None, duration_min=30, tz="America/Los_Angeles"):
-    """
-    Reschedule by explicit calendar_id + event_id; then update the DB row (lead_booking.id == booking_id).
-    """
-    if not calendar_id or not event_id:
-        return {"ok": False, "error": "calendar_id and event_id required for rescheduling."}
-
-    # 1) Patch the Google event
-    result = _google_update_event(calendar_id, event_id, new_start_iso, duration_min, tz)
-
-    # 2) If Google succeeded, upsert the DB booking row
-    try:
-        if result.get("ok") and booking_id:
-            new_dt = dtp.isoparse(new_start_iso)
-            if new_dt.tzinfo is None:
-                try:
-                    new_dt = new_dt.replace(tzinfo=ZoneInfo(tz))
-                except Exception:
-                    # Fallback fixed offset
-                    off = -7 if 3 <= dt.utcnow().month <= 11 else -8
-                    from datetime import timezone as _tzmod, timedelta as _td
-                    new_dt = new_dt.replace(tzinfo=_tzmod(_td(hours=off)))
-            new_dt_z = new_dt.astimezone(_tz.utc).isoformat().replace("+00:00", "Z")
-
-            payload = {"id": booking_id, "appointment_datetime": new_dt_z, "updated_at": _utc_now_iso()}
-            _ = _sb_upsert("lead_booking", payload, on_conflict="id")
-    except Exception as e:
-        logging.exception("Failed to update booking row after reschedule: %s", e)
-
-    # 3) Audit log
-    _sb_insert("crm_updates", {
-        "fields": {
-            "event": "reschedule_requested",
-            "booking_id": booking_id,
-            "new_start_iso": new_start_iso,
-            "calendar_id": calendar_id,
-            "event_id": event_id,
-            "google_result": result,
-        },
-        "created_at": _utc_now_iso()
-    })
-    return {"ok": True, "booking_id": booking_id, "new_start_iso": new_start_iso, "google_result": result}
 
 def terms_of_engagement_letter(email=None, cell_phone=None, cc=None):
     html = "<p>Please review and sign the attached Terms of Engagement (placeholder).</p>"
@@ -507,6 +391,59 @@ def save_lead_qa(unique_caller_id=None, email=None, all_q_and_a=None, practice_a
     _spawn(_sb_insert_async("lead_qa", row))
     return {"ok": True, "unique_caller_id": unique_caller_id}
 
+# ---------------- Helpers for booking metadata ----------------
+def _fetch_lead_profile(unique_caller_id=None, email=None):
+    """
+    Return (full_name, phone, practice_area) from lead_information, preferring unique_caller_id then email.
+    """
+    full_name = phone = practice_area = None
+    if SUPABASE_URL and SUPABASE_KEY:
+        headers = _sb_headers()
+        try:
+            if unique_caller_id:
+                url = f"{_sb_url('lead_information')}?unique_caller_id=eq.{requests.utils.quote(unique_caller_id)}&select=full_name,phone,practice_area&limit=1"
+                r = requests.get(url, headers=headers, timeout=10); r.raise_for_status()
+                data = r.json() or []
+                if data:
+                    rec = data[0]
+                    full_name = rec.get("full_name") or full_name
+                    phone = rec.get("phone") or phone
+                    practice_area = rec.get("practice_area") or practice_area
+            if (not full_name or not phone or not practice_area) and email:
+                url = f"{_sb_url('lead_information')}?email=eq.{requests.utils.quote(email)}&select=full_name,phone,practice_area&order=updated_at.desc&limit=1"
+                r = requests.get(url, headers=headers, timeout=10); r.raise_for_status()
+                data = r.json() or []
+                if data:
+                    rec = data[0]
+                    full_name = full_name or rec.get("full_name")
+                    phone = phone or rec.get("phone")
+                    practice_area = practice_area or rec.get("practice_area")
+        except Exception as e:
+            logging.exception("Lead profile fetch failed: %s", e)
+    return full_name, phone, practice_area
+
+def _build_event_summary(booked_with, lead_name):
+    """
+    Required format: Consultation – {Attorney Name} with {Lead Name}
+    """
+    atty = (booked_with or "Attorney").strip()
+    lname = (lead_name or "Client").strip()
+    return f"Consultation – {atty} with {lname}"
+
+def _build_event_description(full_name, email, phone, practice_area, unique_caller_id, booking_notes=None, old_appointment_datetime=None):
+    lines = [
+        f"Lead: {full_name or '—'} <{email or '—'}>",
+        f"Phone: {phone or '—'}",
+        f"Practice Area: {practice_area or '—'}",
+        f"Unique Caller ID: {unique_caller_id or '—'}",
+    ]
+    if booking_notes:
+        lines.append(f"Notes: {booking_notes}")
+    if old_appointment_datetime:
+        lines.append(f"Rescheduled from: {old_appointment_datetime}")
+    return "\n".join(lines)
+
+# ---------------- Booking (create) ----------------
 async def save_lead_booking(unique_caller_id=None, email=None, appointment_datetime=None, timezone=None, platform=None,
                             meeting_link=None, phone_number=None, booked_with=None, booking_notes=None):
     """
@@ -515,6 +452,12 @@ async def save_lead_booking(unique_caller_id=None, email=None, appointment_datet
     """
     now = _utc_now_iso()
     unique_caller_id = _normalize_caller_id(unique_caller_id)
+
+    # Enrich from profile so we can format title/description consistently
+    prof_name, prof_phone, prof_practice = _fetch_lead_profile(unique_caller_id=unique_caller_id, email=email)
+    lead_name = prof_name or (email.split("@")[0] if email else "Client")
+    phone_for_desc = phone_number or prof_phone
+    practice_for_desc = prof_practice
 
     google_event_id = None
     final_meeting_link = meeting_link
@@ -564,10 +507,20 @@ async def save_lead_booking(unique_caller_id=None, email=None, appointment_datet
             if not cal_id or cal_id.lower() == "primary":
                 print("[google] skipped: in no-DWD mode set GOOGLE_DEFAULT_CALENDAR_ID to a HUMAN calendar email/ID (not 'primary'), shared with the service account.")
             else:
+                event_summary = _build_event_summary(booked_with, lead_name)
+                event_description = _build_event_description(
+                    full_name=lead_name,
+                    email=email,
+                    phone=phone_for_desc,
+                    practice_area=practice_for_desc,
+                    unique_caller_id=unique_caller_id,
+                    booking_notes=booking_notes
+                )
+
                 res = await _google_create_event_async(
                     cal_id,
-                    f"Consultation with {booked_with or 'Attorney'}",
-                    booking_notes or "",
+                    event_summary,
+                    event_description,
                     start_dt.isoformat(),
                     end_dt.isoformat(),
                     tz_name,
@@ -600,7 +553,7 @@ async def save_lead_booking(unique_caller_id=None, email=None, appointment_datet
             link_html = f'<li>Event Link: <a href="{final_meeting_link}">{final_meeting_link}</a></li>' if final_meeting_link else ""
 
             html_content = f"""
-            <p>Dear {email.split('@')[0]},</p>
+            <p>Dear {lead_name},</p>
             <p>Your consultation with {booked_with or 'our attorney'} has been successfully scheduled.</p>
             <p><strong>Meeting Details:</strong></p>
             <ul>
@@ -628,7 +581,7 @@ async def save_lead_booking(unique_caller_id=None, email=None, appointment_datet
         "timezone": timezone,
         "platform": platform,
         "meeting_link": final_meeting_link,
-        "phone_number": phone_number,
+        "phone_number": phone_number or phone_for_desc,
         "booked_with": booked_with,
         "booking_notes": booking_notes,
         "google_event_id": google_event_id,
@@ -838,6 +791,11 @@ def get_booking_info_by_email(email: str):
             except Exception:
                 pass
 
+    # Convenience fields for dialog logic (avoid asking contact info again)
+    lead_full_name = (client_info or {}).get("full_name")
+    lead_phone = (client_info or {}).get("phone")
+    can_reschedule = bool(booking_is_future and google_event_id)
+
     return {
         "ok": True,
         "client_info": client_info,
@@ -848,6 +806,9 @@ def get_booking_info_by_email(email: str):
         "google_event_id": google_event_id,
         "booking_is_future": booking_is_future,
         "booking_pt_iso": booking_parsed_iso,
+        "lead_full_name": lead_full_name,
+        "lead_phone": lead_phone,
+        "can_reschedule": can_reschedule,
     }
 
 def update_client_practice_area(unique_caller_id, email, new_practice_area):
@@ -873,13 +834,22 @@ def update_client_practice_area(unique_caller_id, email, new_practice_area):
 def get_next_available_slots_sync(count=3, slot_minutes=30, horizon_days=21, tz_name=None, cal_id=None):
     cal_id = cal_id or (GOOGLE_DEFAULT_CALENDAR_ID or "")
     tz_name = tz_name or BUSINESS_TZ
-    try:
-        if _gc_get_next_slots:
-            return _run_coro_blocking(_gc_get_next_slots(cal_id=cal_id, tz_name=tz_name, slot_minutes=slot_minutes, count=count, horizon_days=horizon_days))
-    except Exception as e:
-        logging.exception("google_calendar_availability get_next_available_slots failed: %s", e)
+    # Try provider
+    if _gc_get_next_slots:
+        try:
+            res = _run_coro_blocking(_gc_get_next_slots(cal_id=cal_id, tz_name=tz_name, slot_minutes=slot_minutes, count=count, horizon_days=horizon_days))
+            # Fallback if provider reports missing creds or fails
+            if isinstance(res, dict) and res.get("ok"):
+                return res
+            if isinstance(res, dict) and (("No service account creds" in (res.get("error") or "")) or ("creds" in (res.get("error") or "").lower())):
+                pass  # fall through to local
+            else:
+                # If provider failed for other reasons, still fall back to local to keep flow smooth
+                pass
+        except Exception as e:
+            logging.exception("google_calendar_availability get_next_available_slots failed: %s", e)
 
-    # Fallback: generate simple weekday 9:00–16:30 local slots
+    # Local fallback: generate simple weekday 9:00–16:30 PT slots
     try:
         try:
             tz = ZoneInfo(tz_name)
@@ -889,7 +859,7 @@ def get_next_available_slots_sync(count=3, slot_minutes=30, horizon_days=21, tz_
         slots = []
         candidate = now_local
 
-        # start at the next 9:00 slot
+        # start at the next 9:00 slot (or now if within business day)
         candidate = candidate.replace(hour=9, minute=0, second=0, microsecond=0)
         if candidate <= now_local:
             candidate = now_local
@@ -924,11 +894,19 @@ def get_next_available_slots_sync(count=3, slot_minutes=30, horizon_days=21, tz_
 def check_slot_and_alternatives_sync(proposed_start_iso, count=3, slot_minutes=30, tz_name=None, cal_id=None):
     cal_id = cal_id or (GOOGLE_DEFAULT_CALENDAR_ID or "")
     tz_name = tz_name or BUSINESS_TZ
-    try:
-        if _gc_check_slot:
-            return _run_coro_blocking(_gc_check_slot(proposed_start_iso=proposed_start_iso, cal_id=cal_id, tz_name=tz_name, slot_minutes=slot_minutes, count=count))
-    except Exception as e:
-        logging.exception("google_calendar_availability check failed: %s", e)
+
+    # Try provider
+    if _gc_check_slot:
+        try:
+            res = _run_coro_blocking(_gc_check_slot(proposed_start_iso=proposed_start_iso, cal_id=cal_id, tz_name=tz_name, slot_minutes=slot_minutes, count=count))
+            if isinstance(res, dict) and res.get("ok"):
+                return res
+            if isinstance(res, dict) and (("No service account creds" in (res.get("error") or "")) or ("creds" in (res.get("error") or "").lower())):
+                pass  # fall through
+            else:
+                pass
+        except Exception as e:
+            logging.exception("google_calendar_availability check failed: %s", e)
 
     # Basic local validation fallback:
     try:
@@ -1041,7 +1019,6 @@ def reschedule_lead_booking(
     """
     try:
         import base64
-        from urllib.parse import quote_plus
 
         # PT timezone (fallback if ZoneInfo unavailable)
         tz_name = BUSINESS_TZ or "America/Los_Angeles"
@@ -1085,9 +1062,9 @@ def reschedule_lead_booking(
             base = _sb_url("lead_booking")
             q = (
                 f"{base}?select=google_event_id,appointment_datetime"
-                f"&email=eq.{quote_plus(email)}"
-                f"&appointment_datetime=gte.{quote_plus(start_z)}"
-                f"&appointment_datetime=lte.{quote_plus(end_z)}"
+                f"&email=eq.{requests.utils.quote(email)}"
+                f"&appointment_datetime=gte.{requests.utils.quote(start_z)}"
+                f"&appointment_datetime=lte.{requests.utils.quote(end_z)}"
                 f"&order=appointment_datetime.asc&limit=5"
             )
             try:
@@ -1132,21 +1109,28 @@ def reschedule_lead_booking(
         if not cal_id or cal_id.lower() == "primary":
             return {"ok": False, "error": "Missing calendar id. Set GOOGLE_DEFAULT_CALENDAR_ID to a human calendar shared with the service account."}
 
-        # Build patch (NO attendees)
-        description_lines = [
-            f"Lead: {full_name or '—'} <{email}>",
-            f"Phone: {phone_number or '—'}",
-            f"Practice Area: {practice_area or '—'}",
-            f"Unique Caller ID: {unique_caller_id}",
-        ]
-        if booking_notes:
-            description_lines.append(f"Notes: {booking_notes}")
-        if old_appointment_datetime:
-            description_lines.append(f"Rescheduled from: {old_appointment_datetime}")
+        # Ensure we have a lead name/phone/practice for description and title parity
+        lead_name, lead_phone, lead_pa = full_name, phone_number, practice_area
+        if not (lead_name and lead_phone and lead_pa):
+            prof_name, prof_phone, prof_pa = _fetch_lead_profile(unique_caller_id=unique_caller_id, email=email)
+            lead_name = lead_name or prof_name or (email.split("@")[0] if email else "Client")
+            lead_phone = lead_phone or prof_phone
+            lead_pa = lead_pa or prof_pa
 
+        # Build patch (NO attendees) with parity description
+        summary = _build_event_summary(booked_with, lead_name)
+        description = _build_event_description(
+            full_name=lead_name,
+            email=email,
+            phone=lead_phone,
+            practice_area=lead_pa,
+            unique_caller_id=unique_caller_id,
+            booking_notes=booking_notes,
+            old_appointment_datetime=old_appointment_datetime
+        )
         patch = {
-            "summary": f"Consultation – {booked_with}",
-            "description": "\n".join(description_lines),
+            "summary": summary,
+            "description": description,
             "start": {"dateTime": new_start.isoformat(), "timeZone": tz_name},
             "end":   {"dateTime": new_end.isoformat(),   "timeZone": tz_name},
         }
@@ -1176,12 +1160,12 @@ def reschedule_lead_booking(
                 "timezone": tz_name,
                 "platform": platform,
                 "meeting_link": html_link,
-                "phone_number": phone_number,
+                "phone_number": lead_phone,
                 "booked_with": booked_with,
                 "booking_notes": booking_notes or "",
                 "google_event_id": used_event_id,
                 "updated_at": _utc_now_iso(),
-                "note": f"rescheduled via {ev_id_source}"
+                # "note": f"rescheduled via {ev_id_source}"
             }
 
             # Try PATCH existing row by google_event_id
@@ -1228,28 +1212,25 @@ def reschedule_lead_booking(
 # ---------------- Function map ----------------
 FUNCTION_MAP = {
     "practice_area": practice_area,
-    "contact_information": contact_information,
-    "intake_answers_qualification": intake_answers_qualification,
-    "practice_area_attorney_name": practice_area_attorney_name,
-    "calendar_booking": calendar_booking,
-    "reschedule_calendar_booking": reschedule_calendar_booking,
     "terms_of_engagement_letter": terms_of_engagement_letter,
-    "send_email": send_email,  # real email now
-    "get_booking_info_by_email": get_booking_info_by_email,
-    "update_client_practice_area": update_client_practice_area,
+    "send_email": send_email,
 
-    # Intake Agent
+    # Intake Agent core
     "create_or_get_caller_id": create_or_get_caller_id,
+    "get_current_datetime": get_current_datetime,
     "upsert_lead_information": upsert_lead_information,
-    "save_lead_qa": save_lead_qa,
-    "save_lead_booking": save_lead_booking_sync,
     "get_practice_area_questions": get_practice_area_questions,
-    "get_calendar_id_by_practice_area": get_calendar_id_by_practice_area,
+    "save_lead_qa": save_lead_qa,
 
+    # Booking
+    "get_calendar_id_by_practice_area": get_calendar_id_by_practice_area,
     "get_next_available_slots": get_next_available_slots_sync,
     "check_slot_and_alternatives": check_slot_and_alternatives_sync,
     "get_slots_for_dates": get_slots_for_dates,
-    "get_current_datetime": get_current_datetime,
-
+    "save_lead_booking": save_lead_booking_sync,
     "reschedule_lead_booking": reschedule_lead_booking,
+
+    # CRM / returning client
+    "get_booking_info_by_email": get_booking_info_by_email,
+    "update_client_practice_area": update_client_practice_area,
 }
