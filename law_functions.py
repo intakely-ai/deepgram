@@ -274,6 +274,7 @@ def create_or_get_caller_id(existing_id=None, source_channel=None):
             "unique_caller_id": caller_id,
             "source_channel": source_channel,
             "created_at": _utc_now_iso(),
+            "tenant_id": "72761cd2-d733-4cb8-a4c9-114d4a7ebbc1"  # Oakwood Law Firm fixed tenant
         }))
     except Exception:
         pass
@@ -328,7 +329,7 @@ def get_current_datetime(timezones=None):
 
 def upsert_lead_information(unique_caller_id=None, full_name=None, email=None, phone=None, practice_area=None,
                             assigned_attorney=None, summary=None, source_channel=None, caller_type=None,
-                            consent_timestamp=None, locale=None, timezone=None):
+                            consent_timestamp=None, locale=None, timezone=None,tenant_id=None):
     """Upsert lead_information keyed by unique_caller_id; generates one if missing/invalid."""
     now = _utc_now_iso()
     unique_caller_id = _normalize_caller_id(unique_caller_id)
@@ -352,11 +353,12 @@ def upsert_lead_information(unique_caller_id=None, full_name=None, email=None, p
         "locale": locale,
         "timezone": timezone,
         "updated_at": now,
+        "tenant_id": tenant_id or "72761cd2-d733-4cb8-a4c9-114d4a7ebbc1" ,
     }
     _spawn(_sb_upsert_async("lead_information", row, on_conflict="unique_caller_id"))
     return {"ok": True, "unique_caller_id": unique_caller_id}
 
-def save_lead_qa(unique_caller_id=None, email=None, all_q_and_a=None, practice_area_version=None, completion_status="complete"):
+def save_lead_qa(unique_caller_id=None, email=None,tenant_id=None, all_q_and_a=None, practice_area_version=None, completion_status="complete"):
     """Insert a Q&A capture row for this call (one write)."""
     now = _utc_now_iso()
 
@@ -382,6 +384,7 @@ def save_lead_qa(unique_caller_id=None, email=None, all_q_and_a=None, practice_a
     row = {
         "unique_caller_id": unique_caller_id,
         "email": email,
+        "tenant_id": tenant_id or "72761cd2-d733-4cb8-a4c9-114d4a7ebbc1",
         "all_q_and_a": all_q_and_a,
         "practice_area_version": practice_area_version,
         "completion_status": completion_status or "complete",
@@ -587,6 +590,7 @@ async def save_lead_booking(unique_caller_id=None, email=None, appointment_datet
         "google_event_id": google_event_id,
         "created_at": now,
         "updated_at": now,
+        "tenant_id": "72761cd2-d733-4cb8-a4c9-114d4a7ebbc1",
     }
     _spawn(_sb_insert_async("lead_booking", row))
     return {"ok": True, "unique_caller_id": unique_caller_id, "meeting_link": final_meeting_link, "google_event_id": google_event_id}
@@ -1165,6 +1169,7 @@ def reschedule_lead_booking(
                 "booking_notes": booking_notes or "",
                 "google_event_id": used_event_id,
                 "updated_at": _utc_now_iso(),
+                "tenant_id": "72761cd2-d733-4cb8-a4c9-114d4a7ebbc1",
                 # "note": f"rescheduled via {ev_id_source}"
             }
 
