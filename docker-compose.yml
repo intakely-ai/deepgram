@@ -1,0 +1,43 @@
+name: voice-agent
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ['python', 'main.py']
+    working_dir: /app
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+      - '5000:5000'
+    restart: unless-stopped
+    volumes:
+      - ./:/app:rw
+
+  http:
+    build:
+      context: .
+    command: ['python', '-m', 'http.server', '8000', '--directory', '/app']
+    working_dir: /app
+    ports:
+      - '8000:8000'
+    restart: unless-stopped
+    depends_on:
+      - app
+    volumes:
+      - ./:/app:ro
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    restart: unless-stopped
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN} # comes from .env
+      NGROK_LOG: stdout
+    volumes:
+      - ./ngrok.yml:/etc/ngrok.yml:ro
+    command: ['start', '--config', '/etc/ngrok.yml', '--all', '--log=stdout']
+    depends_on:
+      - app
+      - http
+    ports:
+      - '4040:4040' # ngrok web UI
