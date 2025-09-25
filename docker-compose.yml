@@ -1,4 +1,6 @@
+# docker-compose.yml
 name: voice-agent
+
 services:
   app:
     build:
@@ -8,17 +10,27 @@ services:
     working_dir: /app
     environment:
       PYTHONUNBUFFERED: '1'
+      # Optional explicit binds (your code already defaults WS_HOST/WS_PORT/WS_PATH)
+      # WS_HOST: "0.0.0.0"
+      # WS_PORT: "5000"
+      # WS_PATH: "/twilio"
     ports:
-      - '5000:5000'
+      - '80:5000' # expose public :80 -> container :5000
     restart: unless-stopped
     volumes:
       - ./:/app:rw
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:5000/']
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
+  # Optional: a static file server for index.html at http://5.161.47.209:8000/
   http:
-    build:
-      context: .
-    command: ['python', '-m', 'http.server', '8000', '--directory', '/app']
+    image: python:3.13-slim
     working_dir: /app
+    command: ['python', '-m', 'http.server', '8000', '--directory', '/app']
     ports:
       - '8000:8000'
     restart: unless-stopped
@@ -26,18 +38,3 @@ services:
       - app
     volumes:
       - ./:/app:ro
-
-  ngrok:
-    image: ngrok/ngrok:latest
-    restart: unless-stopped
-    environment:
-      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN} # comes from .env
-      NGROK_LOG: stdout
-    volumes:
-      - ./ngrok.yml:/etc/ngrok.yml:ro
-    command: ['start', '--config', '/etc/ngrok.yml', '--all', '--log=stdout']
-    depends_on:
-      - app
-      - http
-    ports:
-      - '4040:4040' # ngrok web UI
