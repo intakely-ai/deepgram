@@ -11,12 +11,6 @@ from dateutil import parser as dtp  # parse ISO datetimes
 
 from email_sender import send_email_smtp  # real SMTP sender
 
-# Import Cal.com integration - Add this near your other imports
-try:
-    import calcom_integration
-except ImportError:
-    calcom_integration = None
-
 # ---------------- Google Calendar provider (optional) ----------------
 _gca = None
 try:
@@ -452,27 +446,6 @@ def _build_event_description(full_name, email, phone, practice_area, unique_call
         lines.append(f"Rescheduled from: {old_appointment_datetime}")
     return "\n".join(lines)
 
-# Add this function to check calendar provider type
-def get_calendar_provider(attorney_id=None):
-    """
-    Determine which calendar provider to use based on attorney or global settings
-    """
-    # Priority: 
-    # 1. Attorney-specific setting (future DB lookup)
-    # 2. Environment variable
-    # 3. Default to 'google'
-    
-    # TODO: In future, look up from DB by attorney_id
-    
-    # For now, use environment variable
-    provider = os.getenv("ATTORNEY_CALENDAR_TYPE", "google").lower()
-    
-    # Validate the provider is supported
-    if provider not in ["google", "cal.com"]:
-        return "google"  # Default fallback
-        
-    return provider
-
 # ---------------- Booking (create) ----------------
 async def save_lead_booking(unique_caller_id=None, email=None, appointment_datetime=None, timezone=None, platform=None,
                             meeting_link=None, phone_number=None, booked_with=None, booking_notes=None):
@@ -647,170 +620,28 @@ def _run_coro_blocking(coro):
         raise error["e"]
     return result.get("value")
 
-# Update save_lead_booking_sync to support Cal.com provider
-def save_lead_booking_sync(
-    unique_caller_id=None,
-    email=None,
-    appointment_datetime=None,
-    timezone=None,
-    platform="video",
-    meeting_link=None,
-    phone_number=None,
-    booked_with=None,
-    booking_notes=None,
-    attorney_id=None
-):
+def save_lead_booking_sync(**kwargs):
     """
-    Save booking using appropriate calendar provider based on attorney settings
+    Sync wrapper for async save_lead_booking with a single-appointment guard:
+    - If a future appointment already exists for this email, return an error so the agent can reschedule.
     """
-    provider = get_calendar_provider(attorney_id)
-    
-    # Use Cal.com if configured
-    if provider == "cal.com" and calcom_integration and appointment_datetime:
-        name = get_lead_name(unique_caller_id) or "Appointment"
-        
-        # Create booking in Cal.com
-        booking_result = calcom_integration.create_booking(
-            email=email,
-            name=name,
-            start_time=appointment_datetime,
-            notes=booking_notes,
-            phone=phone_number
-        )
-        
-        if booking_result.get("ok"):
-            # If Cal.com booking succeeded, save to our database too
-            meeting_link = booking_result.get("meeting_link") or meeting_link
-            
-            # Store Cal.com booking ID in notes for future reference
-            cal_booking_id = booking_result.get("booking_id")
-            if cal_booking_id:
-                notes = f"Cal.com Booking ID: {cal_booking_id}"
-                if booking_notes:
-                    notes += f" | {booking_notes}"
-                booking_notes = notes
-            
-            # Save to database using existing code path
-            try:
-                import requests, json
-                _sb_url_fn = globals().get("_sb_url")
-                _sb_headers_fn = globals().get("_sb_headers")
-                
-                if _sb_url_fn and _sb_headers_fn:
-                    payload = {
-                        "unique_caller_id": unique_caller_id,
-                        "email": email,
-                        "appointment_datetime": appointment_datetime,
-                        "timezone": timezone,
-                        "platform": platform,
-                        "meeting_link": meeting_link,
-                        "phone_number": phone_number,
-                        "booked_with": booked_with,
-                        "booking_notes": booking_notes,
-                    }
-                    r = requests.post(_sb_url_fn("lead_booking"), headers=_sb_headers_fn(), data=json.dumps(payload), timeout=15)
-                    
-                    # Return both Cal.com result and our DB save result
-                    return {
-                        "ok": r.status_code in (200,201),
-                        "provider": "cal.com",
-                        "cal_booking": booking_result.get("booking"),
-                        "meeting_link": meeting_link,
-                        "status_code": r.status_code,
-                        "text": r.text
-                    }
-            except Exception as e:
-                return {"ok": False, "error": str(e), "provider": "cal.com"}
-            
-            return booking_result
-    
-    # Fallback to original Google Calendar implementation
-    # This preserves your existing flow for Google calendar
-    create_google = globals().get("create_google_event_sync") or globals().get("gc_create_event_sync")
-    if create_google:
-        try:
-            return create_google(
-                unique_caller_id=unique_caller_id,
-                email=email,
-                appointment_datetime=appointment_datetime,
-                timezone=timezone,
-                platform=platform,
-                meeting_link=meeting_link,
-                phone_number=phone_number,
-                booked_with=booked_with,
-                booking_notes=booking_notes
+    try:
+        email = kwargs.get("email")
+        if email and SUPABASE_URL and SUPABASE_KEY:
+            from urllib.parse import quote_plus
+            now_z = dt.now(_tz.utc).isoformat().replace("+00:00", "Z")
+            q = (
+                f"{_sb_url('lead_booking')}?email=eq.{quote_plus(email)}"
+                f"&appointment_datetime=gte.{quote_plus(now_z)}&select=id,appointment_datetime&limit=1"
             )
-        except Exception as e:
-            return {"ok": False, "error": f"google_create_failed: {e}"}
+            r = requests.get(q, headers=_sb_headers(), timeout=10); r.raise_for_status()
+            if (r.json() or []):
+                return {"ok": False, "error": "Client already has a future appointment. Please reschedule instead.", "error_code": "already_has_future_booking"}
 
-    # Original DB fallback if neither Cal.com nor Google Calendar succeeded
-    try:
-        import requests, json
-        _sb_url_fn = globals().get("_sb_url")
-        _sb_headers_fn = globals().get("_sb_headers")
-        
-        if _sb_url_fn and _sb_headers_fn:
-            payload = {
-                "unique_caller_id": unique_caller_id,
-                "email": email,
-                "appointment_datetime": appointment_datetime,
-                "timezone": timezone,
-                "platform": platform,
-                "meeting_link": meeting_link,
-                "phone_number": phone_number,
-                "booked_with": booked_with,
-                "booking_notes": booking_notes,
-            }
-            r = requests.post(_sb_url_fn("lead_booking"), headers=_sb_headers_fn(), data=json.dumps(payload), timeout=15)
-            return {"ok": r.status_code in (200,201), "status_code": r.status_code, "text": r.text}
+        return _run_coro_blocking(save_lead_booking(**kwargs))
     except Exception as e:
+        print(f"[booking ERROR] {e}")
         return {"ok": False, "error": str(e)}
-
-    return {"ok": False, "error": "no_calendar_provider_available"}
-
-# Helper function to get lead name from unique_caller_id
-def get_lead_name(unique_caller_id):
-    """Get lead name from the database using unique_caller_id"""
-    if not unique_caller_id:
-        return None
-        
-    try:
-        import requests
-        _sb_url_fn = globals().get("_sb_url")
-        _sb_headers_fn = globals().get("_sb_headers")
-        
-        if _sb_url_fn and _sb_headers_fn:
-            url = f"{_sb_url_fn('lead_information')}?unique_caller_id=eq.{unique_caller_id}&select=full_name"
-            r = requests.get(url, headers=_sb_headers_fn(), timeout=10)
-            
-            if r.status_code == 200 and r.json():
-                return r.json()[0].get("full_name")
-    except Exception as e:
-        logging.error(f"Error getting lead name: {e}")
-        
-    return None
-
-# Update/Replace the get_next_available_slots function to use either Google or Cal.com
-def get_next_available_slots(count=3, slot_minutes=30, horizon_days=14, tz_name=None, calendar_id=None, attorney_id=None):
-    """
-    Get next available slots from the appropriate calendar system based on attorney settings
-    """
-    provider = get_calendar_provider(attorney_id)
-    
-    if provider == "cal.com" and calcom_integration:
-        # Use Cal.com API to get available slots
-        start_date = dt.now(_tz.utc).strftime("%Y-%m-%d")
-        end_date = (dt.now(_tz.utc) + timedelta(days=horizon_days)).strftime("%Y-%m-%d")
-        
-        return calcom_integration.get_available_slots(
-            start_date=start_date,
-            end_date=end_date,
-            duration=slot_minutes
-        )
-    else:
-        # Use existing Google Calendar logic or fallback
-        # This preserves your existing flow
-        return get_next_available_slots_sync(count, slot_minutes, horizon_days, tz_name, calendar_id)
 
 # ---------------- Practice area Qs ----------------
 def get_practice_area_questions(practice_area):
@@ -1263,5 +1094,148 @@ def reschedule_lead_booking(
 
             if not best_id:
                 return {"ok": False, "error": "No matching booking found in Supabase for the provided email and old time (or booking has no google_event_id)."}
+            google_event_id = best_id
+            ev_id_source = "supabase"
+
+        # Google service creds
+        creds = _load_google_creds()
+        if not creds:
+            return {"ok": False, "error": "Missing/invalid Google service account credentials."}
+        service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+
+        # Calendar id: use provided or resolve defaults
+        cal_id = (calendar_id or GOOGLE_DEFAULT_CALENDAR_ID or "").strip().lstrip("=")
+        if not cal_id or cal_id.lower() == "primary":
+            for env_cal in (ATTORNEY_PI_CALENDAR_ID, ATTORNEY_FAMILY_CALENDAR_ID, ATTORNEY_LEMON_CALENDAR_ID):
+                if env_cal:
+                    cal_id = str(env_cal).strip().lstrip("=")
+                    break
+        if not cal_id or cal_id.lower() == "primary":
+            return {"ok": False, "error": "Missing calendar id. Set GOOGLE_DEFAULT_CALENDAR_ID to a human calendar shared with the service account."}
+
+        # Ensure we have a lead name/phone/practice for description and title parity
+        lead_name, lead_phone, lead_pa = full_name, phone_number, practice_area
+        if not (lead_name and lead_phone and lead_pa):
+            prof_name, prof_phone, prof_pa = _fetch_lead_profile(unique_caller_id=unique_caller_id, email=email)
+            lead_name = lead_name or prof_name or (email.split("@")[0] if email else "Client")
+            lead_phone = lead_phone or prof_phone
+            lead_pa = lead_pa or prof_pa
+
+        # Build patch (NO attendees) with parity description
+        summary = _build_event_summary(booked_with, lead_name)
+        description = _build_event_description(
+            full_name=lead_name,
+            email=email,
+            phone=lead_phone,
+            practice_area=lead_pa,
+            unique_caller_id=unique_caller_id,
+            booking_notes=booking_notes,
+            old_appointment_datetime=old_appointment_datetime
+        )
+        patch = {
+            "summary": summary,
+            "description": description,
+            "start": {"dateTime": new_start.isoformat(), "timeZone": tz_name},
+            "end":   {"dateTime": new_end.isoformat(),   "timeZone": tz_name},
+        }
+
+        updated = service.events().patch(
+            calendarId=cal_id,
+            eventId=google_event_id,
+            body=patch,
+            sendUpdates="none"
+        ).execute()
+
+        used_event_id = updated.get("id") or google_event_id
+        html_link = updated.get("htmlLink")
+        # Canonical link (eid = base64url("{eventId} {calendarId}"))
+        try:
+            eid = base64.urlsafe_b64encode(f"{used_event_id} {cal_id}".encode("utf-8")).decode("ascii").rstrip("=")
+            html_link = f"https://calendar.google.com/calendar/event?eid={eid}"
+        except Exception:
+            pass
+
+        # -------- Supabase: UPDATE then fallback to INSERT --------
+        try:
+            payload = {
+                "unique_caller_id": unique_caller_id,
+                "email": email,
+                "appointment_datetime": new_start.astimezone(_tz.utc).isoformat().replace("+00:00", "Z"),
+                "timezone": tz_name,
+                "platform": platform,
+                "meeting_link": html_link,
+                "phone_number": lead_phone,
+                "booked_with": booked_with,
+                "booking_notes": booking_notes or "",
+                "google_event_id": used_event_id,
+                "updated_at": _utc_now_iso(),
+                "tenant_id": "72761cd2-d733-4cb8-a4c9-114d4a7ebbc1",
+                # "note": f"rescheduled via {ev_id_source}"
+            }
+
+            # Try PATCH existing row by google_event_id
+            url = _sb_url("lead_booking") + f"?google_event_id=eq.{requests.utils.quote(used_event_id)}"
+            r = requests.patch(url, headers=_sb_headers(), data=json.dumps(payload), timeout=15)
+
+            # If no row updated, fallback to INSERT
+            do_insert = False
+            if r.status_code in (200, 201):
+                try:
+                    body = r.json()
+                    if isinstance(body, list) and len(body) == 0:
+                        do_insert = True
+                except Exception:
+                    pass
+            elif r.status_code == 204:
+                pass
+            else:
+                do_insert = True
+
+            if do_insert:
+                ins_payload = dict(payload)
+                ins_payload.setdefault("created_at", _utc_now_iso())
+                _ = _sb_insert("lead_booking", ins_payload)
+        except Exception as db_e:
+            print(f"[supabase] reschedule upsert failed: {db_e}")
+
+        return {
+            "ok": True,
+            "google_event_id": used_event_id,
+            "meeting_link": html_link,
+            "new_appointment_datetime": new_start.isoformat()
+        }
+
+    except HttpError as he:
+        try:
+            body = he.content.decode() if hasattr(he, "content") and isinstance(he.content, (bytes, bytearray)) else str(he)
+        except Exception:
+            body = str(he)
+        return {"ok": False, "error": f"Google API error: {body}"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+# ---------------- Function map ----------------
+FUNCTION_MAP = {
+    "practice_area": practice_area,
+    "terms_of_engagement_letter": terms_of_engagement_letter,
+    "send_email": send_email,
+
+    # Intake Agent core
+    "create_or_get_caller_id": create_or_get_caller_id,
+    "get_current_datetime": get_current_datetime,
+    "upsert_lead_information": upsert_lead_information,
+    "get_practice_area_questions": get_practice_area_questions,
+    "save_lead_qa": save_lead_qa,
+
+    # Booking
+    "get_calendar_id_by_practice_area": get_calendar_id_by_practice_area,
+    "get_next_available_slots": get_next_available_slots_sync,
+    "check_slot_and_alternatives": check_slot_and_alternatives_sync,
+    "get_slots_for_dates": get_slots_for_dates,
+    "save_lead_booking": save_lead_booking_sync,
+    "reschedule_lead_booking": reschedule_lead_booking,
+
+    # CRM / returning client
+    "get_booking_info_by_email": get_booking_info_by_email,
+    "update_client_practice_area": update_client_practice_area,
+}
