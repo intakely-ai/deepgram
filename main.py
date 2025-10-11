@@ -1,7 +1,12 @@
-import asyncio
 import base64
 import json
 import os
+import asyncio
+import logging
+import hashlib
+from typing import Optional, Dict, Any
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
 import signal
 from http import HTTPStatus
 
@@ -13,6 +18,51 @@ from websockets import exceptions as ws_exc
 from websockets.asyncio.server import serve  # explicit for >=13
 
 from law_functions import FUNCTION_MAP
+# ensure these imports point to your scaffolding in app/core and db
+from app.core.call_session import CallSession
+from app.core.compliance import process_user_input
+from db.session_manager import upsert_ephemeral_log
+
+logger = logging.getLogger(__name__)
+
+# --- Added: in-memory session + idempotency caches (dev-only) ---
+ACTIVE_CALLS: Dict[str, CallSession] = {}
+RESPONSE_CACHE: Dict[str, Dict[str, Any]] = {}
+CACHE_TTL_SECONDS = 300  # seconds
+
+async def _get_or_create_call_session(session_key: str, caller_phone: Optional[str] = None) -> CallSession:
+    sess = ACTIVE_CALLS.get(session_key)
+    if sess:
+        return sess
+    sess = CallSession(call_sid=session_key, phone_number=caller_phone or f"stream-{session_key}")
+    try:
+        await sess.initialize()
+    except Exception:
+        logger.exception("Failed to initialize CallSession for %s", session_key)
+    ACTIVE_CALLS[session_key] = sess
+    return sess
+
+def _generate_cache_key(session_key: str, text: str) -> str:
+    h = hashlib.sha256()
+    h.update(session_key.encode("utf-8"))
+    h.update(b":")
+    h.update(text.encode("utf-8"))
+    return h.hexdigest()
+
+def _cache_response(cache_key: str, response: Dict[str, Any]) -> None:
+    RESPONSE_CACHE[cache_key] = {"response": response, "ts": asyncio.get_event_loop().time()}
+
+def _get_cached_response(cache_key: str) -> Optional[Dict[str, Any]]:
+    entry = RESPONSE_CACHE.get(cache_key)
+    if not entry:
+        return None
+    if asyncio.get_event_loop().time() - entry["ts"] > CACHE_TTL_SECONDS:
+        try:
+            del RESPONSE_CACHE[cache_key]
+        except KeyError:
+            pass
+        return None
+    return entry["response"]
 
 WS_HOST = os.getenv("WS_HOST", "0.0.0.0")
 WS_PORT = int(os.getenv("WS_PORT", "5000"))
@@ -95,83 +145,82 @@ async def handle_text_message(decoded, twilio_ws, sts_ws, streamsid):
     await handle_barge_in(decoded, twilio_ws, streamsid)
     if decoded.get("type") == "FunctionCallRequest":
         await handle_function_call_request(decoded, sts_ws)
+    if decoded.get("type") in ("transcript", "final_transcript") or "text" in decoded:
+        user_text = decoded.get("text") or decoded.get("alternatives", [{}])[0].get("transcript") or ""
+        if user_text:
+            # 1) Pre-scan / compliance
+            processed = process_user_input(user_text)
 
+            # 2) Get or create session using streamSid (ensure streamSid var exists in this scope)
+            session_key = streamsid  # use streamSid so Twilio start flow is unchanged
+            call_session = await _get_or_create_call_session(session_key, caller_phone=decoded.get("caller"))
 
-async def sts_sender(sts_ws, audio_queue):
-    print("[sts_sender] started")
-    try:
-        while True:
-            chunk = await audio_queue.get()
-            await sts_ws.send(chunk)
-    except asyncio.CancelledError:
-        print("[sts_sender] cancelled")
-        raise
-    except (ws_exc.ConnectionClosedOK, ws_exc.ConnectionClosedError) as e:
-        print(f"[sts_sender] connection closed: {e}")
-
-
-async def sts_receiver(sts_ws, twilio_ws, streamsid_queue):
-    print("[sts_receiver] started")
-    streamsid = await streamsid_queue.get()
-    print(f"[sts_receiver] using streamSid={streamsid}")
-    try:
-        async for message in sts_ws:
-            if isinstance(message, str):
-                print(f"[Deepgram TEXT] {message}")
-                try:
-                    decoded = json.loads(message)
-                except json.JSONDecodeError:
-                    continue
-                await handle_text_message(decoded, twilio_ws, sts_ws, streamsid)
-            else:
-                media_message = {
-                    "event": "media",
-                    "streamSid": streamsid,
-                    "media": {"payload": base64.b64encode(message).decode("ascii")},
-                }
-                await twilio_ws.send(json.dumps(media_message))
-    except asyncio.CancelledError:
-        print("[sts_receiver] cancelled")
-        raise
-    except (ws_exc.ConnectionClosedOK, ws_exc.ConnectionClosedError) as e:
-        print(f"[sts_receiver] connection closed: {e}")
-
-
-async def twilio_receiver(twilio_ws, audio_queue, streamsid_queue):
-    print("[twilio_receiver] started")
-    BUFFER_SIZE = 20 * 160  # 20ms @ 8kHz μ-law (160 bytes per 20ms * 20 = 3200B chunk to STS)
-    inbuffer = bytearray()
-    try:
-        async for message in twilio_ws:
+            # 3) Route input into CallSession (this enforces question-bank/script rules inside CallSession)
             try:
-                data = json.loads(message)
-            except Exception as e:
-                print(f"[twilio_receiver] JSON error: {e}")
-                continue
+                result = await call_session.handle_input(processed["processed_text"])
+            except Exception as exc:
+                logger.exception("CallSession.handle_input failed for %s", session_key)
+                result = {"response": "I'm having trouble — I'll connect you with an attorney.", "next_action": "transfer"}
 
-            event = data.get("event")
-            if event == "start":
-                streamsid = data.get("start", {}).get("streamSid")
-                print(f"[twilio_receiver] start, streamSid={streamsid}")
-                if streamsid:
-                    streamsid_queue.put_nowait(streamsid)
-            elif event == "media":
-                media = data.get("media", {})
-                if media.get("track") == "inbound" and media.get("payload"):
-                    inbuffer.extend(base64.b64decode(media["payload"]))
-            elif event == "stop":
-                print("[twilio_receiver] stop received")
-                break
+            # 4) Persist assistant response to ephemeral session log (so existing audio/TTS path can pick it up)
+            try:
+                await upsert_ephemeral_log(call_session.session_id, {
+                    "type": "assistant_response",
+                    "text": result.get("response"),
+                    "next_action": result.get("next_action"),
+                    "timestamp": __import__("datetime").datetime.utcnow().isoformat()
+                }, extend_ttl_seconds=3600)
+            except Exception:
+                logger.exception("Failed to upsert assistant_response for session %s", call_session.session_id)
 
-            while len(inbuffer) >= BUFFER_SIZE:
-                chunk = inbuffer[:BUFFER_SIZE]
-                audio_queue.put_nowait(chunk)
-                del inbuffer[:BUFFER_SIZE]
-    except asyncio.CancelledError:
-        print("[twilio_receiver] cancelled")
-        raise
-    except (ws_exc.ConnectionClosedOK, ws_exc.ConnectionClosedError) as e:
-        print(f"[twilio_receiver] connection closed: {e}")
+            # 5) OPTIONAL: send response to Deepgram/Twilio TTS pathway
+            #   Reuse your existing Deepgram -> Twilio send path (do NOT reimplement here).
+            #   For example, call the function that sends "assistant_response" events to Deepgram TTS
+            #   or push μ-law frames to twilio_ws. Insert that call here.
+
+
+# --- Minimal HTTP Health server (no FastAPI) ---
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/health":
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not found")
+            return
+        # Basic env checks
+        missing = []
+        required = [
+            "DEEPGRAM_API_KEY", "SUPABASE_URL", "TWILIO_ACCOUNT_SID"
+        ]
+        for k in required:
+            if not os.getenv(k):
+                missing.append(k)
+        status = "ok" if not missing else "degraded"
+        body = {
+            "status": status,
+            "missing_env": missing,
+            "service": "truthline-intake",
+            "time": __import__("datetime").datetime.utcnow().isoformat()
+        }
+        payload = json.dumps(body).encode("utf-8")
+        self.send_response(200 if status == "ok" else 503)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+def start_health_server(host: str = "0.0.0.0", port: int = 8081):
+    server = HTTPServer((host, port), _HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    logger.info("Health server started on http://%s:%d/health", host, port)
+    return server
+
+# Start health server on module load (safe, non-blocking)
+try:
+    start_health_server(port=int(os.getenv("HEALTH_PORT", "8081")))
+except Exception:
+    logger.exception("Failed to start health server")
 
 
 async def try_send_goodbye(twilio_ws, streamsid):
