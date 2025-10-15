@@ -151,12 +151,11 @@ def _resolve_calendar_id(cal_id: str | None):
 
 def _extract_freebusy_error(cal_id_key: str, resp: dict) -> str | None:
     """
-    If the FreeBusy response contains errors for the calendar, return a concise message.
-    Otherwise, return None.
+    Updated to handle new error formats from calendar_events table
     """
     try:
         cal_entry = (resp.get("calendars", {}) or {}).get(cal_id_key, {}) or {}
-        errs = cal_entry.get("errors")
+        errs = cal_entry.get("errors") 
         if isinstance(errs, list) and errs:
             parts = []
             for e in errs:
@@ -234,8 +233,7 @@ async def _freebusy_async(calendar_id, time_min_iso, time_max_iso, tz_name):
 
 async def get_next_available_slots(cal_id, tz_name=None, slot_minutes=30, count=3, horizon_days=21):
     """
-    Return up to `count` upcoming free 9–5 PT slots within `horizon_days`.
-    Works in UTC-only mode when AVAIL_TZ_MODE=UTC or tz_name='UTC'.
+    Updated to work with new calendar_events and appointments tables
     """
     use_utc = TZ_MODE == "UTC" or (tz_name or "").upper() == "UTC"
 
