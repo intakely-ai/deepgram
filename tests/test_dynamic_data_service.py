@@ -38,7 +38,7 @@ class TestDynamicDataService(unittest.TestCase):
                 "practice_area_id, area_code, name, description"
             ).eq("area_code", "personal_injury").execute()
 
-            if not practice_result.
+            if not practice_result:
                 print("Creating practice area 'personal_injury'...")
                 pa_id = str(uuid4())
                 practice_data = {
@@ -49,7 +49,7 @@ class TestDynamicDataService(unittest.TestCase):
                 }
                 practice_result = cls._sb_client.table("practice_areas").insert(practice_data).execute()
 
-                if not practice_result.
+                if not practice_result:
                     raise ValueError("Failed to create practice area 'personal_injury'")
 
             practice_area = practice_result.data[0]
@@ -63,7 +63,7 @@ class TestDynamicDataService(unittest.TestCase):
             ).eq("first_name", "Test"
             ).eq("last_name", "Attorney").execute()
 
-            if not contact_result.
+            if not contact_result:
                 print("Creating attorney contact 'Test Attorney'...")
                 contact_data = {
                     "contact_id": str(uuid4()),
@@ -75,7 +75,7 @@ class TestDynamicDataService(unittest.TestCase):
                 }
                 contact_result = cls._sb_client.table("contacts").insert(contact_data).execute()
 
-                if not contact_result.
+                if not contact_result:
                     print(f"Debug - Contact insert data attempted: {contact_data}")
                     raise ValueError("Failed to create contact 'Test Attorney' - check schema/columns/permissions")
 
@@ -91,7 +91,7 @@ class TestDynamicDataService(unittest.TestCase):
             ).eq("assigned_contact_id", contact_id
             ).limit(1).execute()
 
-            if not assignment_result.
+            if not assignment_result:
                 print("Creating attorney assignment...")
                 assignment_data = {
                     "practice_area_id": practice_area_id,
@@ -114,7 +114,7 @@ class TestDynamicDataService(unittest.TestCase):
             ).eq("state_name", "car_accident"
             ).limit(1).execute()
 
-            if not question_check_result.
+            if not question_check_result:
                 print("Creating test questions for 'personal_injury' -> 'car_accident'...")
                 question1_data = {
                     "practice_area": "personal_injury",
@@ -279,7 +279,7 @@ class TestDynamicDataService(unittest.TestCase):
         try:
             # Use the raw client for cleanup
             delete_result = self._sb_client.table("intake_leads").delete().eq("caller_email", test_email).execute()
-            if delete_result.
+            if delete_result:
                 print(f"Cleaned up test lead: {test_email}")
             else:
                 print(f"Warning: Test lead {test_email} might not have been deleted.")
