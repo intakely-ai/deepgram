@@ -1,0 +1,145 @@
+import os
+import json
+import sys
+import pathlib
+from datetime import datetime, timedelta
+import uuid
+
+# Add parent directory to path
+sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+
+# Load .env into this process
+env_path = pathlib.Path(__file__).parent.parent / ".env"
+if env_path.exists():
+    print(f"Loading environment from {env_path}")
+    for ln in env_path.read_text().splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("#") or "=" not in ln:
+            continue
+        k, v = ln.split("=", 1)
+        os.environ[k.strip()] = v.strip().strip('"').strip("'")
+
+# Import our functions
+from law_functions import get_calendar_provider, get_next_available_slots, save_lead_booking_sync, get_attorney_by_id
+
+# Test attorney_id - replace with a real one from your database
+TEST_ATTORNEY_ID = os.getenv("TEST_ATTORNEY_ID", "")
+
+def create_test_attorney():
+    """Create a test attorney in the database for testing"""
+    if not TEST_ATTORNEY_ID:
+        print("Creating test attorney...")
+        
+        import requests
+        
+        # This assumes you have _sb_url and _sb_headers functions in law_functions
+        from law_functions import _sb_url, _sb_headers
+        
+        test_id = str(uuid.uuid4())
+        payload = {
+            "id": test_id,
+            "name": "Test Attorney",
+            "email": f"test.attorney.{test_id[:8]}@example.com",
+            "calendar_type": "cal.com",  # Test with Cal.com
+            "calcom_event_type_id": os.getenv("CALCOM_EVENT_TYPE_ID", ""),
+            "calendar_api_key": os.getenv("CALCOM_API_KEY", ""),
+            "business_tz": "America/Los_Angeles"
+        }
+        
+        r = requests.post(_sb_url("attorneys"), headers=_sb_headers(), json=payload)
+        if r.status_code in (200, 201):
+            print(f"Test attorney created with ID: {test_id}")
+            return test_id
+        else:
+            print(f"Failed to create test attorney: {r.status_code} - {r.text}")
+            return None
+    
+    return TEST_ATTORNEY_ID
+
+def test_get_provider_info():
+    """Test getting provider info for an attorney"""
+    attorney_id = TEST_ATTORNEY_ID or create_test_attorney()
+    if not attorney_id:
+        print("No attorney ID available for testing.")
+        return
+    
+    print(f"\n--- Testing get_calendar_provider for attorney {attorney_id} ---")
+    provider_info = get_calendar_provider(attorney_id)
+    
+    print(f"Provider: {provider_info['provider']}")
+    print(f"Calendar ID: {provider_info['calendar_id']}")
+    print(f"Cal.com Event Type ID: {provider_info['calcom_event_type_id']}")
+    print(f"Business TZ: {provider_info['business_tz']}")
+    
+    return provider_info
+
+def test_availability():
+    """Test getting available slots"""
+    attorney_id = TEST_ATTORNEY_ID or create_test_attorney()
+    if not attorney_id:
+        print("No attorney ID available for testing.")
+        return
+    
+    print(f"\n--- Testing availability for attorney {attorney_id} ---")
+    result = get_next_available_slots(
+        count=3,
+        slot_minutes=30,
+        horizon_days=14,
+        attorney_id=attorney_id
+    )
+    
+    print(json.dumps(result, indent=2))
+    return result
+
+def test_booking():
+    """Test booking appointment"""
+    attorney_id = TEST_ATTORNEY_ID or create_test_attorney()
+    if not attorney_id:
+        print("No attorney ID available for testing.")
+        return
+    
+    print(f"\n--- Testing booking for attorney {attorney_id} ---")
+    
+    # Get available slots
+    slots = test_availability()
+    
+    if not slots.get("ok") or not slots.get("slots"):
+        print("No available slots found for testing booking.")
+        # Use a future time for testing
+        appointment_time = (datetime.now() + timedelta(days=1, hours=2)).replace(minute=0).isoformat()
+    else:
+        # Use first available slot
+        appointment_time = slots["slots"][0]["start_iso"]
+    
+    # Create a unique test lead
+    test_id = str(uuid.uuid4())[:8]
+    
+    result = save_lead_booking_sync(
+        unique_caller_id=f"test-{test_id}",
+        email=f"test.client.{test_id}@example.com",
+        appointment_datetime=appointment_time,
+        timezone="America/Los_Angeles",
+        platform="video",
+        phone_number="1234567890",
+        booking_notes=f"Test booking created at {datetime.now().isoformat()}",
+        attorney_id=attorney_id
+    )
+    
+    print(json.dumps(result, indent=2))
+    return result
+
+if __name__ == "__main__":
+    print("Attorney Calendar Test")
+    print("======================")
+    print(f"TEST_ATTORNEY_ID: {TEST_ATTORNEY_ID or 'Not set (will create test attorney)'}")
+    print(f"ATTORNEY_CALENDAR_TYPE default: {os.getenv('ATTORNEY_CALENDAR_TYPE', 'google')}")
+    print(f"Cal.com API Key: {'✓ Set' if os.getenv('CALCOM_API_KEY') else '❌ Missing'}")
+    print(f"Cal.com Event Type ID: {'✓ Set' if os.getenv('CALCOM_EVENT_TYPE_ID') else '❌ Missing'}")
+    print(f"Google Calendar ID: {'✓ Set' if os.getenv('GOOGLE_DEFAULT_CALENDAR_ID') else '❌ Missing'}")
+    print()
+    
+    # Run tests
+    provider_info = test_get_provider_info()
+    
+    if provider_info:
+        test_booking()
