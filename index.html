@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Deepgram Click‑to‑Call (Twilio‑style WS)</title>
+  <style>
+    :root {
+      --fg: #0f172a;
+      --muted: #64748b;
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --accent: #2563eb;
+    }
+    body {
+      font-family: system-ui, Segoe UI, Roboto, Arial;
+      background: var(--bg);
+      color: var(--fg);
+      margin: 0;
+    }
+    .wrap {
+      max-width: 900px;
+      margin: 40px auto;
+      padding: 24px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid #e5e7eb;
+      border-radius: 16px;
+      padding: 20px;
+      box-shadow: 0 2px 8px rgba(2, 6, 23, 0.05);
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 1.6rem;
+    }
+    p {
+      margin: 6px 0;
+      color: var(--muted);
+    }
+    .row {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin: 14px 0;
+    }
+    button {
+      appearance: none;
+      border: 1px solid #cbd5e1;
+      border-radius: 12px;
+      background: #fff;
+      padding: 10px 16px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    label {
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+    input[type='text'] {
+      padding: 8px 10px;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      min-width: 280px;
+    }
+    #log {
+      height: 200px;
+      overflow: auto;
+      border: 1px dashed #e2e8f0;
+      background: #fff;
+      border-radius: 10px;
+      padding: 10px;
+      white-space: pre-wrap;
+    }
+    .badge {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: #e2e8f0;
+      color: #0f172a;
+      font-size: 0.75rem;
+    }
+  </style>
+  <div class="wrap">
+    <div class="card">
+      <h1>Deepgram Click‑to‑Call (WebSocket, no Twilio)</h1>
+      <p>
+        This page emulates Twilio Media Streams over WebSocket to your existing
+        backend. It sends <code>start</code>, <code>media</code>,
+        <code>stop</code> events and plays the agent's audio.
+      </p>
+
+      <div class="row">
+        <label>WebSocket URL</label>
+        <input id="wsurl" type="text" value="ws://localhost:5000/twilio" />
+        <span class="badge">change if your server host/port is different</span>
+      </div>
+
+      <div class="row">
+        <button id="start" class="primary">Start Call</button>
+        <button id="stop" disabled>Stop</button>
+      </div>
+
+      <div class="row">
+        <div class="badge">Input: μ‑law @ 8000 Hz • 20ms frames</div>
+        <div class="badge">Output: μ‑law @ 8000 Hz</div>
+      </div>
+
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <script>
+    // ======== Utility: logging ========
+    const logEl = document.getElementById('log');
+    function log(msg) {
+      logEl.textContent += msg + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    // ======== μ-law codec ========
+    function linearToMuLawSample(pcm) {
+      const BIAS = 0x84,
+        CLIP = 32635;
+      let sign = 0;
+      if (pcm < 0) {
+        sign = 0x80;
+        pcm = -pcm;
+      }
+      if (pcm > CLIP) pcm = CLIP;
+      pcm = pcm + BIAS;
+      let exponent = 7;
+      for (
+        let expMask = 0x4000;
+        (pcm & expMask) === 0 && exponent > 0;
+        exponent--, expMask >>= 1
+      ) {}
+      const mantissa = (pcm >> (exponent === 0 ? 4 : exponent + 3)) & 0x0f;
+      return ~(sign | (exponent << 4) | mantissa) & 0xff;
+    }
+    function muLawToLinearSample(mu) {
+      mu = ~mu & 0xff;
+      const sign = mu & 0x80;
+      const exponent = (mu >> 4) & 0x07;
+      const mantissa = mu & 0x0f;
+      let sample = ((mantissa | 0x10) << (exponent + 3)) - 0x84;
+      return sign ? -sample : sample;
+    }
+    function base64FromBytes(bytes) {
+      let bin = '';
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+      }
+      return btoa(bin);
+    }
+    function bytesFromBase64(b64) {
+      const bin = atob(b64);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+
+    // ======== Audio + Resampler (to 8 kHz) ========
+    class Downsampler {
+      constructor(inRate, outRate) {
+        this.inRate = inRate;
+        this.outRate = outRate;
+        this.ratio = inRate / outRate;
+        this.phase = 0;
+      }
+      process(float32) {
+        const step = this.ratio;
+        let pos = this.phase;
+        const outLen = Math.floor((float32.length - pos) / step);
+        if (outLen <= 0) {
+          this.phase = pos;
+          return new Float32Array(0);
+        }
+        const out = new Float32Array(outLen);
+        for (let i = 0; i < outLen; i++) {
+          const idx = pos;
+          const i0 = Math.floor(idx);
+          const i1 = Math.min(i0 + 1, float32.length - 1);
+          const frac = idx - i0;
+          out[i] = float32[i0] * (1 - frac) + float32[i1] * frac;
+          pos += step;
+        }
+        this.phase = pos - float32.length;
+        return out;
+      }
+    }
+
+    // ======== Player (queues 8k mono PCM playback) ========
+    let audioCtx,
+      playHead = 0,
+      activeNodes = new Set();
+    function ensureAudio() {
+      if (!audioCtx)
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    function playMuLaw(u8) {
+      ensureAudio();
+      const pcm16 = new Int16Array(u8.length);
+      for (let i = 0; i < u8.length; i++) pcm16[i] = muLawToLinearSample(u8[i]);
+      const buf = audioCtx.createBuffer(1, pcm16.length, 8000);
+      const ch = buf.getChannelData(0);
+      for (let i = 0; i < pcm16.length; i++) ch[i] = pcm16[i] / 32768;
+      const src = audioCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(audioCtx.destination);
+      const when = Math.max(audioCtx.currentTime, playHead);
+      src.start(when);
+      playHead = when + buf.duration;
+      activeNodes.add(src);
+      src.onended = () => activeNodes.delete(src);
+    }
+    function clearPlayback() {
+      playHead = audioCtx ? audioCtx.currentTime : 0;
+      activeNodes.forEach((n) => {
+        try {
+          n.stop();
+        } catch {}
+      });
+      activeNodes.clear();
+    }
+
+    // ======== WS client that speaks Twilio‑style JSON ========
+    let ws,
+      micStream,
+      sourceNode,
+      workletNode,
+      downsampler,
+      frameBuf = [];
+    const FRAME_SAMPLES = 160; // 20ms @ 8kHz
+
+    async function startCall() {
+      const url = document.getElementById('wsurl').value.trim();
+      if (!url) return alert('Enter WS URL');
+
+      ensureAudio();
+      // Use system default rate (e.g., 48k) and downsample to 8k
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const ctx = audioCtx; // reuse single context
+      await ctx.audioWorklet.addModule(
+        URL.createObjectURL(
+          new Blob(
+            [
+              `
+    class MicTap extends AudioWorkletProcessor{
+      process(inputs){
+        const ch = inputs[0] && inputs[0][0];
+        if (ch) this.port.postMessage(ch, [ch.buffer]);
+        return true;
+      }
+    }
+    registerProcessor('mic-tap', MicTap);
+  `,
+            ],
+            { type: 'application/javascript' }
+          )
+        )
+      );
+      sourceNode = ctx.createMediaStreamSource(micStream);
+      workletNode = new AudioWorkletNode(ctx, 'mic-tap');
+      sourceNode.connect(workletNode);
+
+      downsampler = new Downsampler(ctx.sampleRate, 8000);
+      workletNode.port.onmessage = (ev) => handleMicChunk(ev.data);
+
+      ws = new WebSocket(url);
+      ws.binaryType = 'arraybuffer';
+      const sid = 'browser-' + Math.random().toString(36).slice(2, 10);
+      ws.onopen = () => {
+        disable('#start', true);
+        disable('#stop', false);
+        log('WS connected → sending start');
+        ws.send(JSON.stringify({ event: 'start', start: { streamSid: sid } }));
+      };
+      ws.onmessage = (ev) => {
+        if (typeof ev.data === 'string') {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg.event === 'media' && msg.media && msg.media.payload) {
+              // Agent audio (μ-law @ 8k)
+              playMuLaw(bytesFromBase64(msg.media.payload));
+            } else if (msg.event === 'clear') {
+              log('← clear');
+              clearPlayback();
+            } else if (msg.event === 'stop') {
+              log('← stop');
+              stopCall();
+            } else {
+              // other messages
+              log('← ' + ev.data);
+            }
+          } catch {
+            log('← ' + ev.data);
+          }
+        } else {
+          // Binary not expected from this backend; ignore
+        }
+      };
+      ws.onclose = () => {
+        log('WS closed');
+        stopCall(true);
+      };
+      ws.onerror = (e) => log('WS error');
+    }
+
+    function handleMicChunk(float32) {
+      // Downsample to 8k, then μ-law encode into 20ms (160-sample) frames
+      const ds = downsampler.process(float32);
+      if (!ds.length) return;
+      for (let i = 0; i < ds.length; i++) {
+        // clamp & convert to 16-bit
+        let s = Math.max(-1, Math.min(1, ds[i]));
+        const pcm = s < 0 ? s * 0x8000 : s * 0x7fff;
+        frameBuf.push(linearToMuLawSample(pcm | 0));
+        if (frameBuf.length === FRAME_SAMPLES) {
+          const frame = new Uint8Array(frameBuf);
+          frameBuf.length = 0;
+          if (ws && ws.readyState === 1) {
+            const b64 = base64FromBytes(frame);
+            ws.send(
+              JSON.stringify({
+                event: 'media',
+                media: { track: 'inbound', payload: b64 },
+              })
+            );
+          }
+        }
+      }
+    }
+
+    function stopCall(fromWS) {
+      disable('#start', false);
+      disable('#stop', true);
+      try {
+        workletNode && workletNode.disconnect();
+      } catch {}
+      try {
+        sourceNode && sourceNode.disconnect();
+      } catch {}
+      try {
+        micStream && micStream.getTracks().forEach((t) => t.stop());
+      } catch {}
+      try {
+        ws &&
+          ws.readyState === 1 &&
+          !fromWS &&
+          ws.send(JSON.stringify({ event: 'stop' }));
+      } catch {}
+      try {
+        ws && ws.readyState === 1 && !fromWS && ws.close();
+      } catch {}
+      clearPlayback();
+      log('Stopped');
+    }
+
+    function disable(sel, v) {
+      const el = document.querySelector(sel);
+      if (el) el.disabled = v;
+    }
+
+    document.getElementById('start').onclick = startCall;
+
+    document.getElementById('stop').onclick = () => stopCall(false);
+  </script>
+</html>
