@@ -1,0 +1,14 @@
+# Docker ignores
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+.env
+.venv
+.git
+.gitignore
+dist/
+build/
+node_modules/
+*.sqlite3

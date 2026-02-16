@@ -1,0 +1,9 @@
+version: 2
+# Do NOT put authtoken here. It is read from env (NGROK_AUTHTOKEN).
+tunnels:
+  http8000:
+    addr: http://http:8000
+    proto: http
+  ws5000:
+    addr: http://app:5000
+    proto: http

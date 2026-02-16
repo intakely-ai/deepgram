@@ -1,87 +1,361 @@
 {
-    "type": "Settings",
-    "audio": {
-        "input": {
-            "encoding": "mulaw",
-            "sample_rate": 8000
-        },
-        "output": {
-            "encoding": "mulaw",
-            "sample_rate": 8000,
-            "container": "none"
-        }
+  "type": "Settings",
+  "audio": {
+    "input": { "encoding": "mulaw", "sample_rate": 8000 },
+    "output": { "encoding": "mulaw", "sample_rate": 8000, "container": "none" }
+  },
+  "agent": {
+    "language": "en",
+    "listen": {
+      "provider": { "type": "deepgram", "model": "nova-3" }
     },
-    "agent": {
-        "language": "en",
-        "listen": {
-            "provider": {
-                "type": "deepgram",
-                "model": "nova-3",
-                "keyterms": ["hello", "goodbye"]
-            }
-        },
-        "think": {
-            "provider": {
-                "type": "open_ai",
-                "model": "gpt-4o-mini",
-                "temperature": 0.7
+    "think": {
+      "provider": {
+        "type": "open_ai",
+        "model": "gpt-4o-mini",
+        "temperature": 0.3
+      },
+      "prompt": "ROLE & NAME: You are Benjamin, Oakwood Law Firm's voice intake specialist.\n\nSCOPE: Intake only. No legal advice or fee quotes. Be empathetic, concise, and proceed one field at a time.\n\nBUSINESS: Oakwood Law Firm (456 Justice Avenue, Anaheim, CA). Consultations Mon–Fri 9:00 AM–5:00 PM Pacific Time. No weekends/holidays. Main phone 930-555-1234. Practice areas: Personal Injury; Family Law; Lemon Law. Attorneys: John Doe (PI), Jane Roe (Lemon), Rhonda Fernandez & Christopher Teal (Family).\n\nDO NOT DISCLOSE SYSTEM ACTIONS:\n• Never mention tools/APIs/calendars/databases or “retrieving time”.\n• If a call fails, apologize once (“Sorry—let’s try that again.”) and continue without naming the tool.\n• Use neutral fillers like “One moment, please.”\n\nCLOCK USE RULES:\n• Immediately pin the date/time for this call in Pacific Time (PT). CALL create_or_get_caller_id first, then CALL get_current_datetime ONCE and save as SESSION_CLOCK.\n• Reuse SESSION_CLOCK for all mentions of “today” / “current year” / restated dates.\n• Do NOT call get_current_datetime again unless asked for the time/date or the call exceeds 15 minutes.\n\nSPEAKING & SPELLING STYLE:\n• Warm, brief, professional. One question at a time; re-ask only the field that seems wrong.\n• Read times as words (e.g., “One Thirty Pee Em”). Read phone numbers as grouped digits.\n• When confirming any spelling (names or email), REPEAT RAW CHARACTERS ONLY, spaced: “g h a u s”, “t t”, “two six six”. Do NOT use phonetic words.\n\nBOOKING LIMITS & HOURS:\n• Weekdays only (Mon–Fri). Enforce 9:00 AM–5:00 PM PT.\n• Book only with the relevant specialist.\n• One active appointment per caller.\n\nNO ASSUMPTIONS:\n• Never guess or infer missing contact info or dates/times—always confirm explicitly.\n\nRECOVERY:\n• If any call fails, apologize once, retry the same call; if still failing, continue the conversation verbally without claiming a booking.\n\nCRITICAL FIRST ACTIONS (MANDATORY, ORDERED):\n1) Immediately after greeting, CALL create_or_get_caller_id({ source_channel: 'twilio_voice' }) and store unique_caller_id.\n2) Then CALL get_current_datetime({ timezones: ['UTC','America/Los_Angeles'] }) and store as SESSION_CLOCK: { utc_iso, pt_iso, pt_date, pt_year, pt_weekday, pt_time_24, tz:'America/Los_Angeles' }.\n\nEMAIL SPELLING → NORMALIZATION RULES (use before any lookup):\n• Ask the caller to SPELL the email, letter by letter; capture letters/digits/words (e.g., “two”, “at”, “dot”).\n• Normalize: “at”→@, “dot”→., “underscore”→_, “dash/hyphen”→-, “plus”→+, collapse spaces, lowercase, and join split providers (e.g., “g mail”→“gmail”). Convert spoken digits (“zero…nine”) to 0–9.\n• Repeat back the normalized email EXACTLY (no phonetics), e.g., “a l i at g m a i l dot c o m … which is ali@gmail.com. Is that correct?” Get Yes/No before lookup.\n\nPARAMETER HYGIENE (STRICT — USE ONLY THESE KEYS):\n• create_or_get_caller_id: { source_channel }\n• get_current_datetime: { timezones }\n• practice_area: { practice_area }\n• get_booking_info_by_email: { email }\n•upsert_lead_information: { unique_caller_id, full_name, email, phone, practice_area, summary, source_channel, tenant_id }\n• get_practice_area_questions: { practice_area }\n• save_lead_qa: { unique_caller_id, email, tenant_id,all_q_and_a, practice_area_version, completion_status, }\n• get_calendar_id_by_practice_area: { practice_area }\n• get_next_available_slots: { cal_id, tz_name:'America/Los_Angeles', slot_minutes:30, count }\n• get_slots_for_dates: { cal_id, dates, slot_minutes }\n• check_slot_and_alternatives: { proposed_start_iso, cal_id, tz_name:'America/Los_Angeles', slot_minutes:30, count }\n• save_lead_booking: { unique_caller_id, email, appointment_datetime, timezone:'America/Los_Angeles', platform:'video', phone_number, booked_with, practice_area?, booking_notes?, calendar_id? }\n• reschedule_lead_booking: { unique_caller_id, email, booked_with, new_appointment_datetime, old_appointment_datetime, google_event_id, calendar_id?, full_name?, phone_number?, practice_area?, platform:'video', booking_notes? }\n• terms_of_engagement_letter: { email, cell_phone }\n\nNEVER include any other parameters. Do NOT send keys like 'title' or extra 'slot_minutes' to save_lead_booking. Never pass undefined values (e.g., unique_caller_id must never be 'undefined').\n\nATTORNEY SELECTION (ALWAYS SET, NEVER USE CALLER NAME). If unavailable, map: personal_injury→John Doe; lemon_law→Jane Roe; family_law→Rhonda Fernandez (or Christopher Teal if Rhonda unavailable). Use this value for booked_with.\n\nMANDATORY TOOL-CALL TRIGGERS (follow exactly):\n1) PRACTICE AREA: Once identified, CALL practice_area({ practice_area }).\n2) LEAD UPSERT (NEW CLIENTS ONLY): After you have full_name (first+last), email, phone, AND practice_area, CALL upsert_lead_information({ unique_caller_id, full_name, email, phone, practice_area, summary, source_channel:'twilio_voice',tenant_id: '72761cd2-d733-4cb8-a4c9-114d4a7ebbc1'  }).\n3) QUESTIONS: CALL get_practice_area_questions({ practice_area }) and ask them IN ORDER. Do NOT generate your own questions.\n4) SAVE Q&A: When ALL area questions are answered, CALL save_lead_qa({ unique_caller_id, email,tenant_id:'72761cd2-d733-4cb8-a4c9-114d4a7ebbc1', all_q_and_a, practice_area_version, completion_status:'complete', }).\n5) BOOKING (PI / Family only):\n   • CALL get_calendar_id_by_practice_area({ practice_area }) → cal_id.\n   • If caller gives an exact requested date/time → skip suggestions and proceed to check_slot_and_alternatives.\n   • Otherwise, CALL get_next_available_slots({ cal_id, tz_name:'America/Los_Angeles', slot_minutes:30, count:3 }) and offer two valid weekday 9–5 PT options.\n   • After the caller picks or specifies a time, RESTATE it as an ABSOLUTE PT date/time in the CURRENT year from SESSION_CLOCK. Ask “Is that correct?”\n   • CALL check_slot_and_alternatives({ proposed_start_iso:<PT ISO>, cal_id, tz_name:'America/Los_Angeles', slot_minutes:30, count:3 }).\n     – If available: CALL save_lead_booking({ unique_caller_id, email, appointment_datetime:<PT ISO>, timezone:'America/Los_Angeles', platform:'video', phone_number:phone, booked_with:attorney_name, practice_area, booking_notes:summary, calendar_id:cal_id }).\n     – If unavailable: Read back alternatives; proceed as above.\n\n6) LEMON LAW: If vehicle year < 2019 → explain we handle 2019+; otherwise ask the structured set. BEFORE any Lemon Law booking, CALL terms_of_engagement_letter({ email, cell_phone: phone }) and proceed only after acknowledgment.\n\nFLOW (condensed, enforce order):\n1) Greet → (CALL create_or_get_caller_id) → (CALL get_current_datetime → set SESSION_CLOCK) → 2) Ask: “Are you a returning client?”\n\nRETURNING CLIENT FLOW:\n• Ask for email → normalize → CALL get_booking_info_by_email({ email }) BEFORE asking for date/time.\n• If found, set CONTACT_LOCK. Do NOT ask for name, phone, or practice_area again unless user says they’ve changed.\n• FUTURE appointment → ask only: “What new date/time would you like?” → CALL reschedule_lead_booking.\n• PAST or no appointment → explain → ask for new date/time → CALL save_lead_booking.\n• Not found → “Would you like to start as a new client?” If yes → follow NEW CLIENT FLOW.\n\nNEW CLIENT FLOW:\n• Confirm practice_area → CALL practice_area({ practice_area }).\n• Get and confirm in this order:\n  1) First name (spell & confirm)\n  2) Last name (spell & confirm)\n  3) Email (normalize + confirm)\n  4) Phone (grouped + confirm)\n• Ask permission to continue.\n• CALL upsert_lead_information({ ... }) with all fields.\n• CALL get_practice_area_questions({ practice_area }) → ask ALL questions IN ORDER → CALL save_lead_qa.\n• Offer two weekday options via get_next_available_slots → confirm selected → CALL check_slot_and_alternatives.\n• If available → CALL save_lead_booking; if not, offer alternatives.\n\nGUARDS:\n• Do not book from Q&A answers. Booking requires a separate step and explicit date/time confirmation.\n• “Today” = SESSION_CLOCK.pt_date. Year = SESSION_CLOCK.pt_year.\n• If time is outside 9–5 PT or on weekends/holidays → explain and offer next weekday slot.\n• Only confirm booking after save_lead_booking or reschedule_lead_booking returns success.\n\nRETURNING-ONLY RULE:\n• For returning clients with found records, ask ONLY for the email and new date/time.",
+      "functions": [
+        {
+          "name": "create_or_get_caller_id",
+          "description": "Generate or retrieve a unique_caller_id at call start.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "calendar_id": { "type": "string" },
+              "existing_id": { "type": "string" },
+              "source_channel": { "type": "string" }
             },
-            "prompt": "You are a professional pharmacy assistant. You can: 1) Get drug info with get_drug_info, 2) Place orders with place_order, 3) Look up orders with lookup_order. IMPORTANT: Always ask users to spell out their full name clearly when placing orders. Confirm all order details before processing - including customer name, drug name, and quantity. Be thorough and professional in collecting information. If a user provides a name that's unclear, ask them to spell it out letter by letter. Always confirm the complete order details before finalizing any transaction.",
-            "functions": [
-              {
-                "name": "get_drug_info",
-                "description": "Get detailed information about a specific drug. Use this function when: A customer asks about drug information, side effects, or pricing. A customer wants to know what a medication does. A customer asks questions like 'What is aspirin?' or 'Tell me about ibuprofen'. A customer wants to know drug prices or descriptions. Always provide helpful information about the drug's purpose, price, and any relevant details.",
-                "parameters": {
-                  "type": "object",
-                  "properties": {
-                    "drug_name": {
-                      "type": "string",
-                      "description": "Name of the drug to look up. Convert to lowercase for matching. Examples: 'aspirin', 'ibuprofen', 'acetaminophen'"
-                    }
-                  },
-                  "required": ["drug_name"]
-                }
-              },
-              {
-                "name": "place_order",
-                "description": "Place a new prescription order for a customer. Use this function when: A customer wants to order medication. A customer asks to refill a prescription. A customer says 'I need to order' or 'Can I get some'. Each drug has a predefined quantity that will be ordered automatically. Before placing an order: Verify the drug exists using get_drug_info. Get the customer's name for the order. Always confirm the order details before processing.",
-                "parameters": {
-                  "type": "object",
-                  "properties": {
-                    "customer_name": {
-                      "type": "string",
-                      "description": "Customer's full name for the order. Use as provided by the customer."
-                    },
-                    "drug_name": {
-                      "type": "string",
-                      "description": "Name of the drug to order. Convert to lowercase for matching. Must be a valid drug in our system. Examples: 'aspirin', 'metformin', 'lisinopril', 'atorvastatin', 'omeprazole'"
-                    }
-                  },
-                  "required": ["customer_name", "drug_name"]
-                }
-              },
-              {
-                "name": "lookup_order",
-                "description": "Look up an existing order by its ID. Use this function when: A customer asks about a specific order. A customer wants to check order status. A customer says 'Where is my order' or 'Check order number'. A customer provides an order ID number. Always verify the order exists and provide clear information about the order details.",
-                "parameters": {
-                  "type": "object",
-                  "properties": {
-                    "order_id": {
-                      "type": "integer",
-                      "description": "The order ID number to look up. Must be a valid order number in our system."
-                    }
-                  },
-                  "required": ["order_id"]
-                }
+            "required": ["source_channel"]
+          }
+        },
+        {
+          "name": "get_current_datetime",
+          "description": "Return current time in UTC and America/Los_Angeles, to pin 'today' for this call/session.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "timezones": {
+                "type": "array",
+                "items": { "type": "string" },
+                "default": ["UTC", "America/Los_Angeles"]
               }
-            ]
-        },
-        "speak": {
-            "provider": {
-                "type": "deepgram",
-                "model": "aura-2-thalia-en"
             }
+          }
         },
-        "greeting": "Hello! I'm your pharmacy assistant. I can help you with drug information, placing orders, and checking order status. When placing orders, I'll need your full name spelled out clearly and will confirm all details with you. How can I assist you today?"
-    }
+        {
+          "name": "practice_area",
+          "description": "Set or update the caller's practice area (Personal Injury, Family Law, Lemon Law).",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "practice_area": {
+                "type": "string",
+                "enum": ["personal_injury", "family_law", "lemon_law"]
+              }
+            },
+            "required": ["practice_area"]
+          }
+        },
+        {
+          "name": "upsert_lead_information",
+          "description": "Save or update lead's core contact info once all fields are collected.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "unique_caller_id": { "type": "string" },
+              "full_name": { "type": "string" },
+              "email": { "type": "string" },
+              "phone": { "type": "string" },
+              "practice_area": {
+                "type": "string",
+                "enum": ["personal_injury", "family_law", "lemon_law"]
+              },
+              "summary": { "type": "string" },
+              "source_channel": { "type": "string" },
+              "tenant_id": { "type": "string" }
+            },
+            "required": [
+              "unique_caller_id",
+              "full_name",
+              "email",
+              "phone",
+              "practice_area",
+              "source_channel"
+            ]
+          }
+        },
+        {
+          "name": "get_practice_area_questions",
+          "description": "Retrieve the ordered question list for a given practice area.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "practice_area": {
+                "type": "string",
+                "enum": ["personal_injury", "family_law", "lemon_law"]
+              }
+            },
+            "required": ["practice_area"]
+          }
+        },
+        {
+          "name": "save_lead_qa",
+          "description": "Save the completed Q&A for a lead.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "unique_caller_id": { "type": "string" },
+              "email": { "type": "string" },
+              "tenant_id": { "type": "string" },
+              "all_q_and_a": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "question": { "type": "string" },
+                    "answer": { "type": "string" },
+                    "id": { "type": ["string", "null"] },
+                    "confidence": { "type": ["number", "null"] },
+                    "timestamp": { "type": ["string", "null"] }
+                  },
+                  "required": ["question", "answer"]
+                }
+              },
+              "practice_area_version": { "type": "string" },
+              "completion_status": { "type": "string" }
+            },
+            "required": [
+              "unique_caller_id",
+              "email",
+              "all_q_and_a",
+              "practice_area_version",
+              "completion_status"
+            ]
+          }
+        },
+        {
+          "name": "practice_area_attorney_name",
+          "description": "Return the preferred attorney name to book with for the given practice area.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "practice_area": {
+                "type": "string",
+                "enum": ["personal_injury", "family_law", "lemon_law"]
+              }
+            },
+            "required": ["practice_area"]
+          }
+        },
+        {
+          "name": "get_next_available_slots",
+          "description": "Return up to N upcoming weekday 9–5 PT slots.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "cal_id": { "type": "string" },
+              "tz_name": { "type": "string", "default": "America/Los_Angeles" },
+              "slot_minutes": { "type": "integer", "default": 30 },
+              "count": { "type": "integer", "default": 3 }
+            },
+            "required": ["cal_id"]
+          }
+        },
+        {
+          "name": "get_slots_for_dates",
+          "description": "Return up to N available 30-min PT slots for each requested date.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "cal_id": {
+                "type": "string",
+                "description": "Google Calendar ID"
+              },
+              "dates": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "YYYY-MM-DD (PT)"
+              },
+              "tz_name": { "type": "string", "default": "America/Los_Angeles" },
+              "slot_minutes": { "type": "integer", "default": 30 },
+              "count_per_day": { "type": "integer", "default": 3 }
+            },
+            "required": ["cal_id", "dates"]
+          }
+        },
+        {
+          "name": "check_slot_and_alternatives",
+          "description": "Validate a proposed PT slot; if unavailable, return closest alternatives.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "proposed_start_iso": { "type": "string" },
+              "cal_id": { "type": "string" },
+              "tz_name": { "type": "string", "default": "America/Los_Angeles" },
+              "slot_minutes": { "type": "integer", "default": 30 },
+              "count": { "type": "integer", "default": 3 }
+            },
+            "required": ["proposed_start_iso", "cal_id"]
+          }
+        },
+        {
+          "name": "save_lead_booking",
+          "description": "Create the calendar event after the caller explicitly confirms an absolute PT date/time.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "unique_caller_id": { "type": "string" },
+              "appointment_datetime": {
+                "type": "string",
+                "description": "Start time in PT ISO (e.g., 2025-09-01T13:30:00-07:00)"
+              },
+              "slot_minutes": { "type": "integer", "default": 30 },
+              "timezone": {
+                "type": "string",
+                "default": "America/Los_Angeles"
+              },
+              "platform": { "type": "string", "default": "video" },
+              "phone_number": { "type": "string" },
+              "email": { "type": "string" },
+              "booked_with": { "type": "string" },
+              "booking_notes": { "type": "string" },
+              "title": { "type": "string", "default": "Consultation" }
+            },
+            "required": ["unique_caller_id", "appointment_datetime", "email"]
+          }
+        },
+        {
+          "name": "reschedule_lead_booking",
+          "description": "Reschedule an existing consultation to a new time (30 min). Patches the Google Calendar event, notifies the attendee, and embeds lead info in the event.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "unique_caller_id": { "type": "string" },
+              "email": { "type": "string" },
+              "booked_with": {
+                "type": "string",
+                "description": "Attorney name, e.g. 'John Doe'"
+              },
+              "new_appointment_datetime": {
+                "type": "string",
+                "description": "ISO8601; may include PT offset (e.g., 2025-09-01T10:30:00-07:00)"
+              },
+              "old_appointment_datetime": {
+                "type": "string",
+                "nullable": true
+              },
+              "google_event_id": { "type": "string", "nullable": true },
+              "calendar_id": { "type": "string", "nullable": true },
+              "slot_minutes": { "type": "integer", "default": 30 },
+              "full_name": { "type": "string", "nullable": true },
+              "phone_number": { "type": "string", "nullable": true },
+              "practice_area": { "type": "string", "nullable": true },
+              "platform": { "type": "string", "default": "video" },
+              "booking_notes": { "type": "string", "nullable": true }
+            },
+            "required": [
+              "unique_caller_id",
+              "email",
+              "booked_with",
+              "new_appointment_datetime"
+            ]
+          }
+        },
+        {
+          "name": "terms_of_engagement_letter",
+          "description": "Send Lemon Law terms/engagement letter before booking.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "email": { "type": "string" },
+              "cell_phone": { "type": "string" }
+            },
+            "required": ["email", "cell_phone"]
+          }
+        },
+        {
+          "name": "send_email",
+          "description": "Send a follow-up email.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "to": { "type": "string" },
+              "subject": { "type": "string" },
+              "html": { "type": "string" }
+            },
+            "required": ["to", "subject", "html"]
+          }
+        },
+        {
+          "name": "get_booking_info_by_email",
+          "description": "Retrieve comprehensive information for a returning client by email including booking history and practice area.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "email": { "type": "string" }
+            },
+            "required": ["email"]
+          }
+        },
+        {
+          "name": "get_calendar_id_by_practice_area",
+          "description": "Get the appropriate calendar ID based on practice area for scheduling.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "practice_area": {
+                "type": "string",
+                "enum": ["personal_injury", "family_law", "lemon_law"]
+              }
+            },
+            "required": ["practice_area"]
+          }
+        },
+        {
+          "name": "update_client_practice_area",
+          "description": "Update a client's practice area in the database.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "unique_caller_id": { "type": "string" },
+              "email": { "type": "string" },
+              "new_practice_area": {
+                "type": "string",
+                "enum": ["personal_injury", "family_law", "lemon_law"]
+              }
+            },
+            "required": ["unique_caller_id", "email", "new_practice_area"]
+          }
+        },
+        {
+          "name": "reschedule_calendar_booking",
+          "description": "If the caller is a returning client and wants to reschedule, call the function reschedule_calendar_booking with their booking_id, calendar_id, event_id, and the new requested time (new_start_iso).",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "booking_id": { "type": "string" },
+              "calendar_id": { "type": "string" },
+              "event_id": { "type": "string" },
+              "new_start_iso": {
+                "type": "string",
+                "description": "New start time in ISO format"
+              }
+            },
+            "required": [
+              "booking_id",
+              "calendar_id",
+              "event_id",
+              "new_start_iso"
+            ]
+          }
+        }
+      ]
+    },
+    "speak": {
+      "provider": { "type": "deepgram", "model": "aura-2-zeus-en" }
+    },
+    "greeting": "Thank you for contacting Oakwood Law Firm. I’m Benjamin. To begin, is this your first time reaching us or are you a returning client?"
+  }
 }
